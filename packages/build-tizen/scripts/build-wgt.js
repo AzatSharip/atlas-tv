@@ -602,6 +602,8 @@ async function main() {
 	// Step 4: Clean up unnecessary files to reduce package size
 	log('Cleaning up unnecessary files...');
 	
+	require(path.join(REPO_ROOT, 'scripts', 'prune-tizen-artwork.js'))(DIST);
+
 	// Remove source maps if any
 	const distFiles = fs.readdirSync(DIST);
 	distFiles.forEach(file => {
@@ -749,7 +751,10 @@ async function main() {
 	console.log('');
 }
 
-main().catch(e => {
-	error(e.message);
-	process.exit(1);
-});
+module.exports = {zipDirToFile};
+if (require.main === module) {
+	main().catch(e => {
+		error(e.message);
+		process.exit(1);
+	});
+}
