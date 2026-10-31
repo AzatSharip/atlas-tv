@@ -24,7 +24,7 @@ node scripts/test-atlas-folders.cjs
 npm run build:tizen:oblong -- --skip-tizen-cli
 ```
 
-The result is an **unsigned** `Atlas_Tizen_Oblong_v2.11.1.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
+The result is an **unsigned** `Atlas_Tizen_Oblong_v2.11.2.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
 
 This fork intentionally retains the Tizen application/package IDs and existing `moonfin_*` storage keys for an in-place upgrade of an existing Moonfin installation signed with the **same author certificate**. Atlas and Moonfin therefore cannot coexist under these IDs. Do not uninstall your working client just to change the branding; keep a signed rollback package and a private settings backup outside this repository.
 

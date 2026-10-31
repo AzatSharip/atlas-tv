@@ -1,6 +1,6 @@
 {
 	"name": "@moonfin/build-tizen",
-	"version": "2.11.1",
+	"version": "2.11.2",
 	"private": true,
 	"scripts": {
 		"build": "node scripts/build-wgt.js",
