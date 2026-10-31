@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#16243e"/><stop offset="1" stop-color="#080e20"/></linearGradient><radialGradient id="glow"><stop stop-color="#e7bd89" stop-opacity=".16"/><stop offset="1" stop-color="#e7bd89" stop-opacity="0"/></radialGradient></defs><rect width="1280" height="720" fill="url(#bg)"/><circle cx="1090" cy="140" r="440" fill="url(#glow)"/><svg x="80" y="80" width="310" height="82" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 180" role="img" aria-labelledby="title">
+  <title id="title">ATLAS</title>
+  <defs>
+    <linearGradient id="pearl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".48" stop-color="#f7faff"/>
+      <stop offset="1" stop-color="#b9cdec"/>
+    </linearGradient>
+    <g id="letters" fill-rule="evenodd">
+      <path d="M18 140 80 32H128L150 140H112L108 117H69L56 140ZM83 91H104L98 59Z"/>
+      <path d="M157 32H278L272 62H231L215 140H177L193 62H151Z"/>
+      <path d="M292 32H330L314 109H378L372 140H270Z"/>
+      <path d="M375 140 437 32H485L507 140H469L465 117H426L413 140ZM440 91H461L455 59Z"/>
+      <path d="M537 32H654L648 62H568L564 76H622L642 96L632 140H509L515 109H597L600 95H543L523 75Z"/>
+    </g>
+  </defs>
+  <use href="#letters" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#letters" transform="translate(0 6)" fill="#738bac" opacity=".6"/>
+  <use href="#letters" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#letters" fill="url(#pearl)"/>
+</svg>
+<path d="M1070 160L1190 365H950Z" fill="none" stroke="#e7bd89" stroke-width="2" opacity=".12"/><text x="80" y="442" fill="#f2f5fc" font-family="Arial,sans-serif" font-weight="700" font-size="150" letter-spacing="-4">Мультфильмы</text><text x="85" y="523" fill="#a6b5cd" font-family="Arial,sans-serif" font-size="34">Истории для больших и маленьких</text><rect x="84" y="620" width="1112" height="2" fill="#e7bd89" opacity=".23"/></svg>
