@@ -24,7 +24,7 @@ node scripts/test-atlas-folders.cjs
 npm run build:tizen:oblong -- --skip-tizen-cli
 ```
 
-The result is an **unsigned** `Atlas_Tizen_Oblong_v2.11.2.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
+The result is an **unsigned** `Atlas_Tizen_Oblong_v2.11.3.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
 
 This fork intentionally retains the Tizen application/package IDs and existing `moonfin_*` storage keys for an in-place upgrade of an existing Moonfin installation signed with the **same author certificate**. Atlas and Moonfin therefore cannot coexist under these IDs. Do not uninstall your working client just to change the branding; keep a signed rollback package and a private settings backup outside this repository.
 
@@ -44,6 +44,6 @@ Settings, authentication and optional integrations retain upstream behavior. See
 
 ## Artwork and license
 
-The launcher is an AI-generated ATLAS wordmark in violet, blue and cyan. The floating light wordmark is an original SVG made from paths, with no external font dependency. Artwork is included under the same MPL-2.0 terms as this fork. It is independent artwork; no film logo or third-party brand asset is included as the Atlas identity.
+The current launcher is a smooth vector-derived ATLAS wordmark in violet, blue and cyan, on a 1024×512 (2:1) canvas. The editable source is [launcher-wide.svg](assets/branding/launcher-wide.svg); older AI-generated artwork is retained for history. The floating light wordmark is an original SVG made from paths, with no external font dependency. Artwork is included under the same MPL-2.0 terms as this fork. It is independent artwork; no film logo or third-party brand asset is included as the Atlas identity.
 
 Original source and retained copyright notices: Moonfin contributors. Atlas modifications: Atlas contributors. See [LICENSE](LICENSE).

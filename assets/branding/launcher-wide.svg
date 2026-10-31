@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1024" height="512" viewBox="0 0 1024 512">
+<title>Atlas wide launcher</title><defs>
+<linearGradient id="bg" x2="1" y2="1"><stop stop-color="#10142f"/><stop offset="1" stop-color="#070c20"/></linearGradient>
+<radialGradient id="halo"><stop stop-color="#26278a" stop-opacity=".6"/><stop offset="1" stop-color="#111734" stop-opacity="0"/></radialGradient>
+<linearGradient id="face" x1="0" y1="32" x2="0" y2="140" gradientUnits="userSpaceOnUse"><stop stop-color="#9568fa"/><stop offset=".32" stop-color="#6454ec"/><stop offset=".64" stop-color="#4089f4"/><stop offset="1" stop-color="#6be7ff"/></linearGradient>
+<linearGradient id="edge" x1="0" y1="32" x2="0" y2="140" gradientUnits="userSpaceOnUse"><stop stop-color="#d9c1ff"/><stop offset=".42" stop-color="#897cf3"/><stop offset="1" stop-color="#a7f3ff"/></linearGradient>
+<linearGradient id="depth" x1="0" y1="32" x2="0" y2="155" gradientUnits="userSpaceOnUse"><stop stop-color="#2e1a77"/><stop offset=".7" stop-color="#213eaa"/><stop offset="1" stop-color="#2887c2"/></linearGradient>
+<filter id="glow" x="-20%" y="-100%" width="140%" height="300%"><feGaussianBlur stdDeviation="7"/></filter>
+<filter id="shadow" x="-20%" y="-100%" width="140%" height="300%"><feGaussianBlur stdDeviation="5"/></filter>
+<g id="letters" fill-rule="evenodd"><path transform="translate(0 0)" d="M18 140 80 32H128L150 140H112L108 117H69L56 140ZM83 91H104L98 59Z"/>
+<path transform="translate(8 0)" d="M157 32H278L272 62H231L215 140H177L193 62H151Z"/>
+<path transform="translate(16 0)" d="M292 32H330L314 109H378L372 140H270Z"/>
+<path transform="translate(24 0)" d="M375 140 437 32H485L507 140H469L465 117H426L413 140ZM440 91H461L455 59Z"/>
+<path transform="translate(32 0)" d="M537 32H654L648 62H568L564 76H622L642 96L632 140H509L515 109H597L600 95H543L523 75Z"/></g>
+</defs>
+<rect width="1024" height="512" fill="url(#bg)"/>
+<ellipse cx="512" cy="265" rx="470" ry="240" fill="url(#halo)"/>
+<g transform="translate(94 147) scale(1.19)">
+<use xlink:href="#letters" transform="translate(0 18)" fill="#00091c" opacity=".85" filter="url(#shadow)"/>
+<use xlink:href="#letters" fill="#4753f4" opacity=".32" filter="url(#glow)"/>
+<use xlink:href="#letters" transform="translate(5.5 10)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(4.95 9)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(4.4 8)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(3.8500000000000005 7)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(3.3000000000000003 6)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(2.75 5)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(2.2 4)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(1.6500000000000001 3)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(1.1 2)" fill="url(#depth)"/>
+<use xlink:href="#letters" transform="translate(0.55 1)" fill="url(#depth)"/>
+<use xlink:href="#letters" fill="url(#face)" stroke="url(#edge)" stroke-width="1.65" stroke-linejoin="round"/>
+</g></svg>
