@@ -1,0 +1,258 @@
+@import '../../styles/mixins.less';
+
+@accent: var(--accent-color, #00a4dc);
+@text: var(--theme-text-primary, #fff);
+@muted: var(--theme-text-secondary, rgba(255, 255, 255, 0.7));
+
+.modal {
+	padding: 28px 32px;
+	width: 1100px;
+	max-width: 90vw;
+	max-height: 80vh;
+	overflow-y: auto;
+	background: var(--theme-surface, #1a1a1a);
+	border-radius: 16px;
+}
+
+.header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 20px;
+}
+
+.title {
+	font-size: 28px;
+	font-weight: 600;
+	color: @text;
+	margin: 0;
+}
+
+.closeBtn {
+	width: 44px;
+	height: 44px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.1);
+	border: none;
+	border-radius: 50%;
+	color: @muted;
+	cursor: pointer;
+	transition: all 0.2s;
+	padding: 0;
+
+	svg {
+		width: 22px;
+		height: 22px;
+	}
+
+	&:focus {
+		outline: none;
+		background: @accent;
+		color: var(--theme-on-accent, #fff);
+		transform: scale(1.1);
+	}
+}
+
+.empty {
+	font-size: 20px;
+	color: @muted;
+	padding: 8px 0 16px;
+}
+
+.card {
+	border: 2px solid transparent;
+	border-radius: 16px;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.06);
+	transition: border-color 0.15s ease;
+}
+
+.cardBody {
+	display: flex;
+	align-items: flex-start;
+	padding: 18px 20px;
+	cursor: pointer;
+	outline: none;
+}
+
+.cardIcon {
+	width: 30px;
+	height: 30px;
+	flex-shrink: 0;
+	margin-right: 16px;
+	margin-top: 2px;
+}
+
+.cardText {
+	flex: 1;
+	min-width: 0;
+}
+
+.cardTitleRow {
+	display: flex;
+	align-items: center;
+}
+
+.cardTitle {
+	flex: 1;
+	min-width: 0;
+	font-size: 22px;
+	font-weight: 600;
+	color: @text;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.unreadDot {
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	margin-left: 12px;
+	flex-shrink: 0;
+}
+
+.cardDate {
+	font-size: 15px;
+	color: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.5);
+	margin-top: 2px;
+}
+
+.preview {
+	margin-top: 8px;
+	font-size: 19px;
+	line-height: 1.35;
+	color: @muted;
+	white-space: pre-line;
+	overflow: hidden;
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+}
+
+.cardActions {
+	display: flex;
+	flex-wrap: wrap;
+	padding: 0 20px 18px 66px;
+	.flex-wrap-gap(10px);
+}
+
+.footer {
+	display: flex;
+	justify-content: center;
+	margin-top: 16px;
+}
+
+.button {
+	padding: 12px 24px;
+	border-radius: 12px;
+	border: 2px solid transparent;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.1);
+	color: @text;
+	font-size: 19px;
+	font-weight: 600;
+	cursor: pointer;
+	outline: none;
+	transition: all 0.15s ease;
+
+	&:focus {
+		background: @accent;
+		border-color: #fff;
+		color: var(--theme-on-accent, #fff);
+	}
+}
+
+// The opened body
+.body {
+	margin-top: 8px;
+	font-size: 19px;
+	line-height: 1.4;
+	color: @muted;
+	.flex-col-gap(8px);
+}
+
+.paragraph {
+	margin: 0;
+	white-space: pre-line;
+}
+
+.h1 {
+	font-size: 24px;
+	font-weight: 700;
+	color: @text;
+}
+
+.h2 {
+	font-size: 22px;
+	font-weight: 700;
+	color: @text;
+}
+
+.h3 {
+	font-size: 20px;
+	font-weight: 600;
+	color: @text;
+}
+
+.mdList {
+	margin: 0;
+	padding-left: 28px;
+}
+
+.quote {
+	margin: 0;
+	padding-left: 14px;
+	border-left: 3px solid rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.25);
+}
+
+.code {
+	font-family: monospace;
+	font-size: 17px;
+	padding: 0 4px;
+	border-radius: 4px;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.07);
+}
+
+.codeBlock {
+	margin: 0;
+	padding: 10px 12px;
+	border-radius: 6px;
+	font-family: monospace;
+	font-size: 17px;
+	white-space: pre-wrap;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.07);
+}
+
+.link {
+	color: @accent;
+	text-decoration: underline;
+}
+
+// The QR code in place of the list
+.qrPanel {
+	text-align: center;
+}
+
+.hint {
+	font-size: 18px;
+	color: @muted;
+	margin-top: 8px;
+	word-break: break-all;
+}
+
+.qrContainer {
+	display: flex;
+	justify-content: center;
+	margin: 20px 0;
+}
+
+.qrCanvas {
+	background: #ffffff;
+	border-radius: 8px;
+}
+
+// The spacing helpers sit last so a child's own margin further up cant win.
+.list > * + * {
+	margin-top: 10px;
+}

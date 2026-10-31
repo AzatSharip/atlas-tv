@@ -1,0 +1,17 @@
+{
+	"id": "org.moonfin.webos.service",
+	"description": "Moonfin network proxy service",
+	"services": [
+		{
+			"name": "org.moonfin.webos.service",
+			"description": "Performs HTTP(S) requests outside the WebView TLS stack with an up-to-date CA bundle",
+			"commands": [
+				{
+					"name": "fetch",
+					"description": "Fetch a URL and return status, headers and body",
+					"public": false
+				}
+			]
+		}
+	]
+}

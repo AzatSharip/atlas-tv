@@ -1,0 +1,147 @@
+.overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 9999;
+}
+
+.modal {
+	width: 1400px !important;
+	min-width: 1200px !important;
+	max-width: 85vw;
+	max-height: 80vh;
+	background: var(--theme-background, #0a0a0a) !important;
+	border: 3px solid rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.15);
+	border-radius: 24px;
+	box-shadow: 0 16px 64px rgba(var(--theme-scrim-rgb, 0, 0, 0), 0.95);
+	padding: 48px;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+.title {
+	margin-bottom: 24px;
+	color: var(--theme-accent, #00a4dc);
+	flex-shrink: 0;
+	text-align: center;
+}
+
+.versionInfo {
+	margin-bottom: 24px;
+	flex-shrink: 0;
+	text-align: center;
+}
+
+.newVersion {
+	display: block;
+	font-size: 32px;
+	font-weight: 600;
+	margin-bottom: 8px;
+}
+
+.currentVersion {
+	display: block;
+	font-size: 22px;
+	color: var(--theme-text-primary, #ffffff);
+	opacity: 0.7;
+}
+
+.notesScroller {
+	flex: 1;
+	min-height: 300px;
+	max-height: 500px;
+	margin-bottom: 32px;
+	overflow: hidden;
+}
+
+.notes {
+	padding: 28px;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.06);
+	border-radius: 16px;
+	text-align: left;
+	line-height: 1.7;
+	font-size: 22px;
+	color: var(--theme-text-primary, #ffffff);
+
+	h1, h2, h3 {
+		margin: 16px 0 12px 0;
+		color: var(--theme-accent, #00a4dc);
+	}
+
+	h1 {
+		font-size: 28px;
+	}
+
+	h2 {
+		font-size: 26px;
+	}
+
+	h3 {
+		font-size: 24px;
+	}
+
+	strong {
+		font-weight: 700;
+		color: var(--theme-text-primary, #ffffff);
+	}
+
+	em {
+		font-style: italic;
+	}
+
+	p {
+		margin: 0 0 12px 0;
+	}
+
+	ul, ol {
+		margin: 0 0 12px 0;
+		padding: 0;
+	}
+
+	li {
+		margin-left: 24px;
+		list-style: disc;
+		margin-bottom: 8px;
+	}
+
+	ol li {
+		list-style: decimal;
+	}
+
+	code {
+		padding: 0 6px;
+		border-radius: 4px;
+		background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.12);
+		font-family: monospace;
+		font-size: 20px;
+	}
+
+	// A fenced block keeps its own line breaks, and a long line wraps rather
+	// than pushing the panel wider.
+	pre {
+		margin: 0 0 12px 0;
+		padding: 16px;
+		border-radius: 8px;
+		background: rgba(0, 0, 0, 0.35);
+		font-family: monospace;
+		font-size: 20px;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+}
+
+.buttons {
+	display: flex;
+	justify-content: center;
+	flex-shrink: 0;
+
+	> * + * {
+		margin-left: 20px;
+	}
+}

@@ -1,0 +1,3354 @@
+import {useState, useEffect, useCallback, useRef, useMemo} from 'react';
+import Spotlight from '@enact/spotlight';
+import Button from '@enact/sandstone/Button';
+import $L from '@enact/i18n/$L';
+import Hls from 'hls.js';
+import * as playback from '../../services/playback';
+import {getImageUrl, getLogoUrl} from '../../utils/helpers';
+import {api as jellyfinApi, createApiForServer, getServerUrl} from '../../services/jellyfinApi';
+import AudioMode from './audio/AudioMode';
+import useAudioTransport from './audio/useAudioTransport';
+import useLyrics from './audio/useLyrics';
+import {handleAudioFocusKey, exitAudioPanel, nextAudioFocusRow, AUDIO_FOCUS_IDS} from './audio/audioFocus';
+import {detectPlatformVersion, getH264FallbackProfile} from '../../services/deviceProfile';
+import {initPgsRenderer, initPgsInBandRenderer, disposePgsRenderer} from '../../utils/pgsRenderer';
+import {supportsAssRenderer, initAssCanvasRenderer, disposeAssRenderer, setAssTime, clearAssCanvas} from '../../utils/assRenderer';
+import {waitForAssReady} from '../../utils/assRendererReady';
+import {
+	initPlayerPlatform,
+	registerAppStateObserver,
+	keepScreenOn,
+	cleanupVideoElement,
+	waitForDecoderRelease,
+	setDisplayWindow,
+	getSharedVideoElement,
+	setupVisibilityHandler,
+	setupPlatformLifecycle,
+	leavesPlayerInBackground,
+	resumesAfterFirstFrame,
+	showHostSubtitle,
+	notePlaybackError
+} from '../../services/video';
+import {KEYS, isBackKey} from '../../utils/keys';
+import {useSettings} from '../../context/SettingsContext';
+import {useSyncPlay} from '../../context/SyncPlayContext';
+import * as syncPlayService from '../../services/syncPlay';
+import {getSubtitleOverlayStyle, getSubtitleTextStyle, sanitizeSubtitleHtml, resolveSubtitleStyleSettings} from '../../utils/subtitleConstants';
+import {isHdrOutput, findVideoStream} from '../../utils/videoRange';
+import {selectPreferredAudioStream} from '../../utils/audioTrackSelection';
+import {applyResumeRewind, skipBackSeconds, skipForwardSeconds, zoomInternalFromSetting, zoomSettingFromInternal} from '../../utils/playbackTuning';
+import {saveAudioPref, saveSubtitlePref} from '../../services/subtitlePrefs';
+import serverLogger from '../../services/serverLogger';
+import {resolveSeriesAudio} from './initialAudio';
+import {resolveInitialSubtitle} from './initialSubtitle';
+import PlayerControls, {usePlayerButtons} from './PlayerControls';
+import useLiveProgram from './useLiveProgram';
+import useMediaSession from './useMediaSession';
+import {hasTrickplayPreview} from '../../components/TrickplayPreview';
+import {isTrickplayOn} from '../../utils/trickplayLayout';
+import useChannelCarousel from './useChannelCarousel';
+import ChannelCarousel from './ChannelCarousel';
+import NextUpOverlay from './NextUpOverlay';
+import SkipSegmentOverlay from './SkipSegmentOverlay';
+import StillWatchingDialog from './StillWatchingDialog';
+import useBufferingAnimation from './useBufferingAnimation';
+import useLiveRecovery, {reopenLiveChannel} from './useLiveRecovery';
+import LiveFailedCard from './LiveFailedCard';
+import LoadingAnimationLayer from '../../components/LoadingAnimation';
+import useSleepTimer from './useSleepTimer';
+import useSyncPlayCommands from './useSyncPlayCommands';
+import useSegmentPopups from './useSegmentPopups';
+import {isPreroll, nextInQueue, shouldAutoAdvance} from '../../utils/cinemaMode';
+import {driftMs, needsSeek, seekLanded, correctionOptions, DRIFT_CHECK_MS, GROUP_SEEK_SETTLE_TIMEOUT_MS} from '../../utils/syncDrift';
+import {createReadyGate} from '../../utils/syncReady';
+import {createSkipGovernor, chooseCorrection, STALL_DEBOUNCE_MS} from '../../utils/syncCorrection';
+import {syncLog} from '../../utils/syncLog';
+import {
+	NextEpisodeContainer, CONTROLS_HIDE_DELAY,
+	withTimeout, SEGMENT_FETCH_TIMEOUT, ASS_READY_WAIT
+} from './PlayerConstants';
+import {
+	toSubtitleLanguage,
+	mapSubtitleStreamsFromMediaSource,
+	mapRemoteSubtitleOptions,
+	pollForSubtitleAppearance,
+	remoteSubtitleSearchError,
+	remoteSubtitleDownloadError,
+	remoteSubtitleNotAppearedMessage
+} from './remoteSubtitleUtils';
+import {getVideoDisplayAspectRatio, getZoomDisplayRect} from './aspectRatioUtils';
+import {describeVideoStream, readVideoSupport} from './videoDiagnostics';
+import useRemotePlayerControls from './useRemotePlayerControls';
+
+import css from './WebOSPlayer.module.less';
+
+const getWebOSFullscreenRect = () => {
+	if (typeof window === 'undefined') {
+		return {width: 1920, height: 1080};
+	}
+
+	const cssWidth = Math.max(1, Math.round(window.innerWidth || 1920));
+	const cssHeight = Math.max(1, Math.round(window.innerHeight || 1080));
+	const dpr = Math.max(1, window.devicePixelRatio || 1);
+	const physicalWidth = Math.round(cssWidth * dpr);
+	const physicalHeight = Math.round(cssHeight * dpr);
+	const screenWidth = Math.round(window.screen?.width || physicalWidth || 1920);
+	const screenHeight = Math.round(window.screen?.height || physicalHeight || 1080);
+
+	return {
+		width: Math.max(screenWidth, physicalWidth),
+		height: Math.max(screenHeight, physicalHeight)
+	};
+};
+
+// A burst of arrow presses on the seek bar becomes one group seek, since every
+// request puts the whole group through a round of buffering.
+const GROUP_SEEK_DEBOUNCE_MS = 600;
+
+// Both of these go to PlayerControls as props, so they sit out here and keep one
+// identity instead of being rebuilt on every render.
+const renderInfoPlaybackRows = ({css: c, mediaSource, playMethod}) => {
+	if (playMethod !== 'Transcode') return null;
+	const match = (mediaSource?.TranscodingUrl || '').match(/TranscodeReasons=([^&]+)/);
+	const reason = match
+		? decodeURIComponent(match[1]).split(',').map(r => r.replace(/([A-Z])/g, ' $1').trim()).join(', ')
+		: $L('Unknown');
+	return (
+		<div className={`${c.infoRow} ${c.infoWarning}`}>
+			<span className={c.infoLabel}>{$L('Transcode Reason')}</span>
+			<span className={c.infoValue}>{reason}</span>
+		</div>
+	);
+};
+
+const renderInfoVideoExtra = ({css: c, videoStream}) => (
+	videoStream?.BitDepth ? (
+		<div className={c.infoRow}>
+			<span className={c.infoLabel}>{$L('Bit Depth')}</span>
+			<span className={c.infoValue}>{videoStream.BitDepth}-bit</span>
+		</div>
+	) : null
+);
+
+const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialSubtitleIndex, initialStartPositionTicks, initialQuality, forceTranscode, onEnded, onBack, onGuide, onPlayNext, onSelectPerson, audioPlaylist, videoQueue, liveTvChannels, onPausedChange}) => {
+	const {settings, updateSetting} = useSettings();
+	const {isInGroup, lastCommand} = useSyncPlay();
+	const syncPlayCommandRef = useRef(false);
+	const suppressBufferingUntilRef = useRef(0);
+	const groupSeekTimerRef = useRef(null);
+	const groupSeekTargetRef = useRef(null);
+	const stallRecheckTimerRef = useRef(null);
+	// A seek the group commanded, until the set actually lands on it. webOS
+	// keeps playing the old buffer, and reporting the old position, while its
+	// pipeline works through a seek, and a second seek issued into that window
+	// can leave it on neither. So while one is in flight the position stays on
+	// the target, nothing else seeks, and the Ready report waits.
+	const groupSeekPendingRef = useRef(null);
+	const groupSeekSettleTimerRef = useRef(null);
+	// A player opened inside a group is held until the group unpauses it. The
+	// server only corrects a joiner's position when its Ready says it is
+	// paused: told "playing at the start" it takes the set as already under
+	// way, never sends the seek, and holds the others until the film catches
+	// up. Startup calls play() more than once (autoplay, metadata, HLS), so
+	// one pause isn't enough; every play is answered while this holds.
+	const groupHoldRef = useRef(isInGroup);
+
+	const [mediaUrl, setMediaUrl] = useState(null);
+	const [mimeType, setMimeType] = useState('video/mp4');
+	const [isLoading, setIsLoading] = useState(true);
+	const [isBuffering, setIsBuffering] = useState(false);
+	const [error, setError] = useState(null);
+	const [title, setTitle] = useState('');
+	const [subtitle, setSubtitle] = useState('');
+	const [logoUrl, setLogoUrl] = useState(null);
+	const [playMethod, setPlayMethod] = useState(null);
+	const [isHdrContent, setIsHdrContent] = useState(false);
+	const [isPaused, setIsPaused] = useState(false);
+	// Mirrors isPaused for the hide timer, which fires outside the render cycle.
+	const isPausedRef = useRef(false);
+	isPausedRef.current = isPaused;
+	// The key handler is rebuilt every render, so the listener reaches it through this
+	// rather than being torn down and re-added every time playback state moves.
+	const keyDownRef = useRef(null);
+	const [currentTime, setCurrentTime] = useState(0);
+	const [duration, setDuration] = useState(0);
+	const [audioStreams, setAudioStreams] = useState([]);
+	const [subtitleStreams, setSubtitleStreams] = useState([]);
+	const [chapters, setChapters] = useState([]);
+	const [selectedAudioIndex, setSelectedAudioIndex] = useState(null);
+	const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState(-1);
+	const [subtitleTrackEvents, setSubtitleTrackEvents] = useState(null)
+	const [currentSubtitleText, setCurrentSubtitleText] = useState(null);
+	const [subtitleOffset, setSubtitleOffset] = useState(0);
+	const subtitleOffsetRef = useRef(0);
+	subtitleOffsetRef.current = subtitleOffset;
+	const [controlsVisible, setControlsVisible] = useState(false);
+	const [activeModal, setActiveModal] = useState(null);
+	// Seeded from the advanced playback menu, which picks a cap before playback starts.
+	const [selectedQuality, setSelectedQuality] = useState(initialQuality || null);
+	const [remoteSubtitleResults, setRemoteSubtitleResults] = useState([]);
+	const [isSearchingRemoteSubtitles, setIsSearchingRemoteSubtitles] = useState(false);
+	const [isDownloadingRemoteSubtitle, setIsDownloadingRemoteSubtitle] = useState(false);
+	const [remoteSubtitleError, setRemoteSubtitleError] = useState(null);
+	const [mediaSegments, setMediaSegments] = useState(null);
+	const [nextEpisode, setNextEpisode] = useState(null);
+	const [isSeeking, setIsSeeking] = useState(false);
+	const [seekPosition, setSeekPosition] = useState(0);
+	const [mediaSourceId, setMediaSourceId] = useState(null);
+	const {showBuffering, noteSeek} = useBufferingAnimation({
+		isBuffering,
+		isSeeking,
+		hasPreview: isTrickplayOn(settings) && hasTrickplayPreview(item.Id, mediaSourceId)
+	});
+	const [hasTriedTranscode, setHasTriedTranscode] = useState(false);
+	const [focusRow, setFocusRow] = useState('bottom');
+	const [isAudioMode, setIsAudioMode] = useState(false);
+	const [audioTab, setAudioTab] = useState('queue');
+	const [isFavorite, setIsFavorite] = useState(false);
+	const [zoomMode, setZoomMode] = useState(() => zoomInternalFromSetting(settings.playerZoomMode));
+	const [videoDisplayAspectRatio, setVideoDisplayAspectRatio] = useState(null);
+	const [decodedAspectRatio, setDecodedAspectRatio] = useState(null);
+	const [castMembers, setCastMembers] = useState([]);
+	const [isLoadingCastMembers, setIsLoadingCastMembers] = useState(false);
+	const subtitleStyleSettings = useMemo(
+		() => resolveSubtitleStyleSettings(settings, isHdrContent),
+		[settings, isHdrContent]
+	);
+
+	const zoomModeLabel = useMemo(() => {
+		if (zoomMode === 'fill') return $L('Crop');
+		if (zoomMode === 'stretch') return $L('Stretch');
+		return $L('Fit');
+	}, [zoomMode]);
+
+	const hasCastMembers = useMemo(() => {
+		if (castMembers.length > 0) return true;
+		return item?.Type === 'Episode' && Boolean(item?.SeriesId);
+	}, [castMembers.length, item]);
+
+	const lyrics = useLyrics(item, isAudioMode, currentTime);
+
+	const lastFocusedElementRef = useRef(null);
+
+	const videoRef = useRef(null);
+	// Read through a ref when an item loads, so the queue growing while it plays doesn't load it again.
+	const videoQueueRef = useRef(videoQueue);
+	videoQueueRef.current = videoQueue;
+	// Whether the pipeline has stalled: set by waiting, cleared once frames
+	// move again. readyState is no use for this on webOS, which sits at
+	// HAVE_CURRENT_DATA while playing perfectly well, so a test on it reported
+	// Buffering to the group after every seek and unpause, stopped everyone,
+	// and only let the Ready out when the watchdog gave up.
+	const stalledRef = useRef(false);
+	// Whether the pipeline has drawn a frame of the current item yet.
+	const renderedRef = useRef(false);
+	const syncPlaySample = useCallback(() => {
+		const video = videoRef.current;
+		return {
+			isPlaying: Boolean(video && !video.paused) && !groupHoldRef.current,
+			positionTicks: video ? Math.floor(video.currentTime * 10000000) : 0
+		};
+	}, []);
+	const readyGate = useMemo(() => createReadyGate({
+		sample: syncPlaySample,
+		isBuffering: () => !videoRef.current || stalledRef.current || !!groupSeekPendingRef.current,
+		report: () => syncPlayService.sendReadyRequest(syncPlaySample)
+	}), [syncPlaySample]);
+	// Corrective skips are attempts that have to land and render before the
+	// drift is measured again; see syncCorrection.js for the loop this stops.
+	const skipGovernorRef = useRef(createSkipGovernor());
+	// A pause the set is sitting out to let the group catch up.
+	const syncWaitTimerRef = useRef(null);
+	const cancelSyncWait = useCallback(() => {
+		clearTimeout(syncWaitTimerRef.current);
+		syncWaitTimerRef.current = null;
+	}, []);
+	useEffect(() => {
+		skipGovernorRef.current.reset();
+		renderedRef.current = false;
+		// Held for the group, the set waits paused for the server's Unpause:
+		// after a join, when the server is waiting on this set's Ready, or
+		// while the group is paused or waiting. A set that starts an item the
+		// group is already playing is waited on by nobody, so it plays from
+		// where the group is and the drift check takes up the rest. Held, it
+		// would sit paused for a command that never comes.
+		if (isInGroup) {
+			const state = syncPlayService.getGroupState();
+			groupHoldRef.current = syncPlayService.isReadyOwed() || state !== 'Playing';
+			syncLog('[Player] SyncPlay start', groupHoldRef.current ? 'held for the group,' : 'with the group,', 'state', state);
+		}
+	}, [item?.Id, isInGroup]);
+	useEffect(() => cancelSyncWait, [cancelSyncWait]);
+	const containerRef = useRef(null);
+	const handlersRef = useRef({});
+	const positionRef = useRef(0);
+	const playSessionRef = useRef(null);
+	const runTimeRef = useRef(0);
+	const healthMonitorRef = useRef(null);
+	const unregisterAppStateRef = useRef(null);
+	const controlsTimeoutRef = useRef(null);
+	const lastSeekTargetRef = useRef(null);
+	// A scrub that paused playback to hold the preview still, where it has got to, and whether
+	// playback was going before it.
+	const scrubHoldRef = useRef({active: false, wasPlaying: false, ticks: null});
+	const seekingTranscodeRef = useRef(false);
+	const seekDebounceTimerRef = useRef(null);
+	const scrubSettleTimerRef = useRef(null);
+	const isCleaningUpRef = useRef(false);
+	const isHandlingErrorRef = useRef(false);
+	const sourceTransitionRef = useRef(false);
+	const transcodeRetryCountRef = useRef(0);
+	const forceHlsJsRef = useRef(false);
+	const platformVersionRef = useRef(null);
+	useEffect(() => {
+		detectPlatformVersion().then((version) => { platformVersionRef.current = version; });
+	}, []);
+	const isLiveTV = item.Type === 'TvChannel';
+	const liveProgram = useLiveProgram(item, isLiveTV);
+	const prevItemIdRef = useRef(null);
+	const hlsPlayerRef = useRef(null);
+	const pendingAudioRef = useRef(null);
+
+	const playbackStartTimeoutRef = useRef(null);
+	const playbackStartTimedOutRef = useRef(false);
+	const pendingResumeTicksRef = useRef(0);
+	const hasReportedStartRef = useRef(false);
+	const lastSeekTimeRef = useRef(0);
+	const mediaUrlRef = useRef(null);
+	const pgsRendererRef = useRef(null);
+	// Invalidates async PGS starts when the user changes track/item before one finishes.
+	const pgsInitGenRef = useRef(0);
+	// Re-runs the PGS setup of the current subtitle, for a seek that left the in band
+	// reader behind the playhead.
+	const pgsInitRef = useRef(null);
+	const assRendererRef = useRef(null);
+	const assCanvasRef = useRef(null);
+	// Bumped by every renderer start and teardown, so a start that finishes after a
+	// newer one, or after the player moved on, throws its renderer away.
+	const assInitGenRef = useRef(0);
+	// index of a subtitle the server is currently burning into the stream
+	const burnInSubtitleRef = useRef(null);
+
+	const restartCurrent = useCallback(() => {
+		const video = videoRef.current;
+		if (video) { video.currentTime = 0; video.play(); }
+	}, []);
+	const seekTo = useCallback((seconds) => {
+		const video = videoRef.current;
+		if (video) video.currentTime = seconds;
+	}, []);
+	const getPositionSeconds = useCallback(() => videoRef.current?.currentTime || 0, []);
+
+	const {
+		shuffleMode, repeatMode, hasNextTrack, hasPrevTrack,
+		handleToggleShuffle, handleToggleRepeat, setShuffleMode, setRepeatMode, handleNextTrack, handlePrevTrack,
+		handleSelectQueueTrack, handleSeekToLyric, handleEnterAudioPanel, getNextStep
+	} = useAudioTransport({
+		item, audioPlaylist, isAudioMode, onPlayNext, positionRef,
+		restartCurrent, seekTo, getPositionSeconds, setFocusRow
+	});
+
+	const destroyHlsPlayer = () => {
+		if (hlsPlayerRef.current) {
+			hlsPlayerRef.current.destroy();
+			hlsPlayerRef.current = null;
+		}
+	};
+
+	const applyWebOSZoomWindow = useCallback(() => {
+		if (typeof window === 'undefined' || isAudioMode) return;
+
+		const screenRect = getWebOSFullscreenRect();
+
+		const decodedAspect = Number.isFinite(decodedAspectRatio) && decodedAspectRatio > 0 ? decodedAspectRatio : null;
+		const targetAspect = Number.isFinite(videoDisplayAspectRatio) && videoDisplayAspectRatio > 0
+			? videoDisplayAspectRatio
+			: decodedAspect;
+		const destRect = getZoomDisplayRect(screenRect, targetAspect, zoomMode);
+
+		const sourceWidth = Math.max(1, Math.round(videoRef.current?.videoWidth || screenRect.width));
+		const sourceHeight = Math.max(1, Math.round(videoRef.current?.videoHeight || screenRect.height));
+		const correction = decodedAspect && targetAspect ? (targetAspect / decodedAspect) : 1;
+
+		let sourceX = 0;
+		let sourceY = 0;
+		let sourceW = sourceWidth;
+		let sourceH = sourceHeight;
+
+		if (zoomMode === 'fill' && decodedAspect && targetAspect) {
+			const screenAspect = screenRect.width / screenRect.height;
+			const correctedW = sourceWidth * correction;
+			const correctedH = sourceHeight;
+			const correctedAspect = correctedW / correctedH;
+
+			if (correctedAspect > screenAspect) {
+				const wantedCorrectedW = correctedH * screenAspect;
+				const cropCorrectedX = (correctedW - wantedCorrectedW) / 2;
+				sourceX = Math.max(0, Math.round(cropCorrectedX / correction));
+				sourceW = Math.max(1, Math.round(wantedCorrectedW / correction));
+			} else if (correctedAspect < screenAspect) {
+				const wantedCorrectedH = correctedW / screenAspect;
+				const cropY = (correctedH - wantedCorrectedH) / 2;
+				sourceY = Math.max(0, Math.round(cropY));
+				sourceH = Math.max(1, Math.round(wantedCorrectedH));
+			}
+		}
+
+		setDisplayWindow({
+			x: sourceX,
+			y: sourceY,
+			width: sourceW,
+			height: sourceH,
+			destX: destRect.x,
+			destY: destRect.y,
+			destWidth: destRect.width,
+			destHeight: destRect.height
+		});
+	}, [decodedAspectRatio, videoDisplayAspectRatio, zoomMode, isAudioMode]);
+
+	// Match a Jellyfin audio stream to a browser audioTracks entry by language,
+	// falling back to array-position if language matching is ambiguous or unavailable.
+	const matchAudioTrack = (nativeTracks, jellyfinStreams, targetIndex) => {
+		const selectedStream = jellyfinStreams.find(s => s.index === targetIndex);
+		if (selectedStream) {
+			const lang = (selectedStream.language || '').toLowerCase();
+			if (lang && lang !== 'unknown' && lang !== 'und') {
+				const langMatches = [];
+				for (let i = 0; i < nativeTracks.length; i++) {
+					const trackLang = (nativeTracks[i].language || '').toLowerCase();
+					if (trackLang === lang || trackLang.startsWith(lang) || lang.startsWith(trackLang)) {
+						langMatches.push(i);
+					}
+				}
+				if (langMatches.length === 1) return langMatches[0];
+				if (langMatches.length > 1) {
+					const sameLanguageStreams = jellyfinStreams.filter(s => (s.language || '').toLowerCase() === lang);
+					const posInSameLanguage = sameLanguageStreams.findIndex(s => s.index === targetIndex);
+					if (posInSameLanguage >= 0 && posInSameLanguage < langMatches.length) {
+						return langMatches[posInSameLanguage];
+					}
+				}
+			}
+		}
+		const trackPosition = jellyfinStreams.findIndex(s => s.index === targetIndex);
+		if (trackPosition >= 0 && trackPosition < nativeTracks.length) return trackPosition;
+		return -1;
+	};
+
+	// handleBack is defined further down, so the timer reaches it through a ref
+	// rather than forcing the whole player to be reordered.
+	const handleBackRef = useRef(null);
+	const {sleepMinutes, remainingSeconds: sleepRemainingSeconds, startSleepTimer} = useSleepTimer({
+		onExpire: () => handleBackRef.current?.(),
+		ticking: activeModal === 'sleep'
+	});
+
+	const {topButtons, bottomButtons} = usePlayerButtons({
+		isPaused, audioStreams, subtitleStreams, chapters,
+		nextEpisode, isAudioMode, isLiveTV, hasNextTrack, hasPrevTrack,
+		shuffleMode, repeatMode, selectedQuality,
+		selectedSubtitleIndex, canDownloadRemoteSubtitles: !isAudioMode && Boolean(item?.Id), hasCastMembers, zoomModeLabel, zoomModeKey: zoomMode,
+		sleepMinutes
+	});
+
+	useEffect(() => {
+		const people = Array.isArray(item?.People) ? item.People : [];
+		setCastMembers(people);
+	}, [item]);
+
+	const applyVideoAndAssGeometry = useCallback(() => {
+		const video = videoRef.current;
+		if (!video) return;
+
+		const sw = window.innerWidth || 1920;
+		const sh = window.innerHeight || 1080;
+		const screenAspect = sw / sh;
+
+		const decodedAspect = Number.isFinite(decodedAspectRatio) && decodedAspectRatio > 0
+			? decodedAspectRatio : null;
+		const targetAspect = (Number.isFinite(videoDisplayAspectRatio) && videoDisplayAspectRatio > 0
+			? videoDisplayAspectRatio : decodedAspect) || screenAspect;
+
+		// Content width when scaled to full height, and height when scaled to full width.
+		const wAtFullHeight = Math.round(sh * targetAspect);
+		const hAtFullWidth = Math.round(sw / targetAspect);
+		// Letter/pillar-box rect (fit) and the cropped rect (fill).
+		const fitRect = targetAspect >= screenAspect
+			? {x: 0, y: Math.round((sh - hAtFullWidth) / 2), w: sw, h: hAtFullWidth}
+			: {x: Math.round((sw - wAtFullHeight) / 2), y: 0, w: wAtFullHeight, h: sh};
+		const fillRect = targetAspect >= screenAspect
+			? {x: -Math.round((wAtFullHeight - sw) / 2), y: 0, w: wAtFullHeight, h: sh}
+			: {x: 0, y: -Math.round((hAtFullWidth - sh) / 2), w: sw, h: hAtFullWidth};
+
+		video.style.position = 'absolute';
+		video.style.objectFit = 'fill';
+		video.style.transform = 'none';
+		video.style.transformOrigin = 'center center';
+
+		const videoRect = zoomMode === 'stretch' ? {x: 0, y: 0, w: sw, h: sh}
+			: zoomMode === 'fill' ? fillRect : fitRect;
+		video.style.width = `${videoRect.w}px`;
+		video.style.height = `${videoRect.h}px`;
+		video.style.left = `${videoRect.x}px`;
+		video.style.top = `${videoRect.y}px`;
+
+		// Track the content rect (fit for fit/stretch, fill for crop) so the ASS
+		// overlay aligns to the video in every zoom mode (#235).
+		const assRect = zoomMode === 'fill' ? fillRect : fitRect;
+		const canvas = assCanvasRef.current;
+		if (canvas) {
+			canvas.style.left = `${assRect.x}px`;
+			canvas.style.top = `${assRect.y}px`;
+			canvas.style.width = `${assRect.w}px`;
+			canvas.style.height = `${assRect.h}px`;
+		}
+		if (assRendererRef.current?.resize) {
+			assRendererRef.current.resize(Math.max(1, assRect.w), Math.max(1, assRect.h));
+		}
+	}, [zoomMode, videoDisplayAspectRatio, decodedAspectRatio]);
+
+	useEffect(() => {
+		applyVideoAndAssGeometry();
+	}, [applyVideoAndAssGeometry]);
+
+	useEffect(() => {
+		applyWebOSZoomWindow();
+	}, [applyWebOSZoomWindow]);
+
+	useEffect(() => {
+		if (typeof window === 'undefined') return () => {};
+		const handleResize = () => applyWebOSZoomWindow();
+		window.addEventListener('resize', handleResize);
+		return () => window.removeEventListener('resize', handleResize);
+	}, [applyWebOSZoomWindow]);
+
+	const initAssRendererForStream = useCallback(async (stream, {waitMs = 0} = {}) => {
+		if (!stream?.isAss || !assCanvasRef.current) {
+			return false;
+		}
+		const generation = ++assInitGenRef.current;
+		const isCurrent = () => generation === assInitGenRef.current;
+
+		try {
+			const assUrl = playback.getAssSubtitleUrl(stream);
+			if (!assUrl) {
+				return false;
+			}
+			const assFontsUrl = playback.getAssFontsUrl(stream);
+
+			// Canvas mode (not video-auto-sync): we position the overlay ourselves to
+			// the video's display rect so subtitles stay aligned in every zoom mode (#235).
+			const renderer = await initAssCanvasRenderer(assCanvasRef.current, assUrl, assFontsUrl, (err) => {
+				console.error('[Player] ASS renderer error, falling back to text', err);
+				disposeAssRenderer(assRendererRef.current);
+				assRendererRef.current = null;
+				clearAssCanvas(assCanvasRef.current);
+				playback.fetchSubtitleData(stream).then(data => {
+					setSubtitleTrackEvents(data?.TrackEvents || null);
+				}).catch(() => setSubtitleTrackEvents(null));
+			});
+
+			if (renderer && !isCurrent()) {
+				disposeAssRenderer(renderer);
+				return false;
+			}
+			if (renderer) {
+				assRendererRef.current = renderer;
+				setSubtitleTrackEvents(null);
+				applyVideoAndAssGeometry();
+				if (waitMs) await waitForAssReady(renderer, waitMs, isCurrent);
+				return true;
+			}
+		} catch (err) {
+			console.error('[Player] ASS init failed, falling back to text', err);
+		}
+		if (!isCurrent()) return false;
+
+		try {
+			const data = await playback.fetchSubtitleData(stream);
+			if (!isCurrent()) return false;
+			if (data && data.TrackEvents) {
+				setSubtitleTrackEvents(data.TrackEvents);
+			} else {
+				setSubtitleTrackEvents(null);
+			}
+		} catch (err) {
+			setSubtitleTrackEvents(null);
+		}
+
+		return false;
+	}, [applyVideoAndAssGeometry]);
+
+	// Both the first use of a subtitle and a change away from another one land here, the
+	// same way the ASS renderer does, so a PGS track can be picked at any point.
+	const initPgsRendererForStream = useCallback(async (stream) => {
+		if (!stream?.isImageBased || !videoRef.current) return false;
+		const generation = ++pgsInitGenRef.current;
+		const isCurrent = () => generation === pgsInitGenRef.current;
+
+		disposePgsRenderer(pgsRendererRef.current);
+		pgsRendererRef.current = null;
+		pgsInitRef.current = null;
+		try {
+			let renderer = stream.inBand ?
+				await initPgsInBandRenderer(videoRef.current, stream, {startTime: videoRef.current.currentTime, timeOffset: -subtitleOffsetRef.current}) :
+				await initPgsRenderer(videoRef.current, stream);
+			if (!isCurrent()) {
+				if (renderer) disposePgsRenderer(renderer);
+				return false;
+			}
+			// Keep Jellyfin's sidecar URL as a lazy fallback. Merely carrying the URL
+			// does not start extraction; it is fetched only if the range-demux path
+			// cannot read this Matroska (missing Cues, unsupported layout, no Range).
+			if (!renderer && stream.inBand && stream.deliveryUrl) {
+				console.warn('[Player] In-band PGS unavailable, falling back to sidecar');
+				renderer = await initPgsRenderer(videoRef.current, stream);
+				if (!isCurrent()) {
+					if (renderer) disposePgsRenderer(renderer);
+					return false;
+				}
+			}
+			if (!renderer) {
+				console.error('[Player] PGS renderer returned null');
+				setSubtitleTrackEvents(null);
+				return false;
+			}
+			// Moonfin positive offset means delay the subtitle; libpgs positive offset
+			// means render it early, so the signs are intentionally opposite.
+			renderer.timeOffset = -subtitleOffsetRef.current;
+			pgsRendererRef.current = renderer;
+			// libpgs cannot rewind its subtitle list, so a seek back behind the data it has
+			// already parsed is answered with a fresh renderer.
+			pgsInitRef.current = renderer.needsRestart ? () => initPgsRendererForStream(stream) : null;
+			setSubtitleTrackEvents(null);
+			return true;
+		} catch (err) {
+			if (!isCurrent()) return false;
+			console.error('[Player] PGS renderer failed:', err);
+			setSubtitleTrackEvents(null);
+			return false;
+		}
+	}, []);
+
+	// The server pulls an embedded text track out of the file before it can answer, which
+	// takes a while on a big file and on Emby means reading the whole file through. So
+	// nothing waits on it: the video starts, or the menu closes, and the lines fill in once
+	// the track lands. Every later pick, item change and unmount bumps the generation,
+	// which drops an answer that arrives too late to be about the track on screen.
+	const loadTextTrack = useCallback((stream) => {
+		const generation = assInitGenRef.current;
+		setSubtitleTrackEvents(null);
+		playback.fetchSubtitleData(stream).then((data) => {
+			if (generation !== assInitGenRef.current) return;
+			setSubtitleTrackEvents(data?.TrackEvents || null);
+		}).catch((err) => {
+			console.error('[Player] Error fetching subtitle data:', err);
+		});
+	}, []);
+
+	useEffect(() => {
+		const init = async () => {
+			await initPlayerPlatform();
+			await keepScreenOn(!isPaused);
+
+			unregisterAppStateRef.current = registerAppStateObserver(
+				() => {
+					console.log('[Player] App resumed');
+					if (videoRef.current && !isPaused) {
+						videoRef.current.play();
+					}
+				},
+				() => {
+					console.log('[Player] App backgrounded');
+					videoRef.current?.pause();
+				}
+			);
+		};
+		init();
+
+		return () => {
+			keepScreenOn(false);
+			if (unregisterAppStateRef.current) {
+				unregisterAppStateRef.current();
+			}
+		};
+	}, [isPaused]);
+
+	useEffect(() => {
+		onPausedChange?.(isPaused);
+	}, [isPaused, onPausedChange]);
+
+	// Handle webOS app visibility and relaunch events to properly pause/cleanup video
+	useEffect(() => {
+		let wasPlaying = false;
+
+		const handleAppHidden = () => {
+			console.log('[Player] App hidden - pausing and saving progress');
+			if (videoRef.current) {
+				wasPlaying = !videoRef.current.paused;
+				if (wasPlaying) {
+					videoRef.current.pause();
+				}
+			}
+			// Script freezes as soon as the app is backgrounded and a kill while
+			// suspended runs nothing at all, so the stop has to go out right now.
+			// It also records the resume position. Coming back re-reports start
+			// on the same session.
+			playback.reportBackgroundStop(positionRef.current);
+			if (leavesPlayerInBackground()) handleBackRef.current?.();
+		};
+
+		const handleAppVisible = () => {
+			console.log('[Player] App visible - resuming if was playing');
+			if (playback.consumeBackgroundStopFired()) {
+				// the session was stopped on the server while we were backgrounded,
+				// so let handlePlay re-report start and restart the reporting loops
+				// when playback resumes below
+				hasReportedStartRef.current = false;
+			}
+			if (videoRef.current && wasPlaying) {
+				const p = videoRef.current.play();
+				if (p && typeof p.catch === 'function') {
+					p.catch(err => {
+						console.warn('[Player] Failed to resume playback:', err);
+					});
+				}
+				playback.reportProgress(positionRef.current, {isPaused: false, eventName: 'unpause'});
+			}
+		};
+
+		// backing out of the app entirely never reaches the unmount cleanup, so
+		// report the stop here or the session sits open on the server
+		const handleAppExit = () => {
+			// always report the stop, even at position 0 (live TV and freshly
+			// opened media start there), or the session lingers on the server
+			playback.reportStopBeacon(positionRef.current);
+		};
+
+		const handleRelaunch = (params) => {
+			console.log('[Player] App relaunched with params:', params);
+			destroyHlsPlayer();
+			if (videoRef.current) {
+				cleanupVideoElement(videoRef.current);
+			}
+		};
+
+		const removeVisibilityHandler = setupVisibilityHandler(handleAppHidden, handleAppVisible);
+		const removeLifecycleHandler = setupPlatformLifecycle(handleRelaunch);
+		window.addEventListener('pagehide', handleAppExit);
+		window.addEventListener('beforeunload', handleAppExit);
+
+		return () => {
+			removeVisibilityHandler();
+			removeLifecycleHandler();
+			window.removeEventListener('pagehide', handleAppExit);
+			window.removeEventListener('beforeunload', handleAppExit);
+		};
+	}, []);
+
+	// Attach the singleton video element to the container and strip leftover trailer state.
+	useEffect(() => {
+		const video = getSharedVideoElement();
+		videoRef.current = video;
+
+		video.onplaying = null;
+		video.onended = null;
+		video.onerror = null;
+		video.className = '';
+
+		video.muted = false;
+		video.defaultMuted = false;
+		video.volume = 1;
+		video.removeAttribute('muted');
+
+		if (containerRef.current && !containerRef.current.contains(video)) {
+			containerRef.current.appendChild(video);
+		}
+
+		const listeners = {
+			loadedmetadata: () => handlersRef.current.onLoadedMetadata?.(),
+			play: () => handlersRef.current.onPlay?.(),
+			pause: () => handlersRef.current.onPause?.(),
+			timeupdate: () => handlersRef.current.onTimeUpdate?.(),
+			waiting: () => handlersRef.current.onWaiting?.(),
+			playing: () => handlersRef.current.onPlaying?.(),
+			seeked: () => handlersRef.current.onSeeked?.(),
+			ended: () => handlersRef.current.onEnded?.(),
+			error: () => handlersRef.current.onError?.(),
+		};
+
+		for (const [event, handler] of Object.entries(listeners)) {
+			video.addEventListener(event, handler);
+		}
+
+		const container = containerRef.current;
+
+		return () => {
+			for (const [event, handler] of Object.entries(listeners)) {
+				video.removeEventListener(event, handler);
+			}
+			if (container && container.contains(video)) {
+				container.removeChild(video);
+			}
+			videoRef.current = null;
+		};
+	}, []);
+
+	const [tuneRevision, setTuneRevision] = useState(0);
+	// A live re-resolve can come back on the very url it replaced, and the stream still has to start over.
+	const [sourceRevision, setSourceRevision] = useState(0);
+	const directAllowed = !forceTranscode && !settings.preferTranscode;
+
+	const releaseLiveChannel = useCallback(async () => {
+		isCleaningUpRef.current = true;
+		destroyHlsPlayer();
+		await cleanupVideoElement(videoRef.current);
+		await playback.reportStop(positionRef.current);
+	}, []);
+
+	const reResolveLiveChannel = useCallback(async (route) => {
+		isCleaningUpRef.current = true;
+		destroyHlsPlayer();
+		await cleanupVideoElement(videoRef.current);
+		const result = await reopenLiveChannel({
+			item,
+			mediaSourceId,
+			maxBitrate: selectedQuality || settings.maxBitrate,
+			stereoUpmixEnabled: settings.stereoUpmixEnabled,
+			directAllowed,
+			wasDirectPlay: playMethod === playback.PlayMethod.DirectPlay,
+			positionTicks: positionRef.current
+		}, route);
+		if (!result.url) throw new Error('No playable stream for the channel');
+		isCleaningUpRef.current = false;
+		hasReportedStartRef.current = false;
+		playSessionRef.current = result.playSessionId;
+		setPlayMethod(result.playMethod);
+		setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
+		setMimeType(result.mimeType || 'video/mp4');
+		setMediaUrl(result.url);
+		setSourceRevision((revision) => revision + 1);
+	}, [item, playMethod, selectedQuality, settings.maxBitrate, settings.stereoUpmixEnabled, mediaSourceId, directAllowed]);
+
+	const {recovery: liveRecovery, reconnecting} = useLiveRecovery({
+		isLiveTV,
+		itemId: item.Id,
+		reResolve: reResolveLiveChannel,
+		release: releaseLiveChannel,
+		onLost: () => setError($L('Failed to play {name}').replace('{name}', item.Name || '')),
+		isDirectPlay: () => playMethod === playback.PlayMethod.DirectPlay
+	});
+
+	const handleRetryChannel = useCallback(() => {
+		liveRecovery?.abandon('the viewer retried the channel');
+		setTuneRevision((revision) => revision + 1);
+	}, [liveRecovery]);
+
+	useEffect(() => {
+		const videoElement = videoRef.current;
+		const assCanvas = assCanvasRef.current;
+		console.log('[Player] Main useEffect running with deps:', {
+			itemId: item?.Id,
+			selectedQuality,
+			maxBitrate: settings.maxBitrate,
+			preferTranscode: settings.preferTranscode,
+			subtitleMode: settings.subtitleMode,
+			skipIntro: settings.introAction,
+			initialAudioIndex,
+			initialSubtitleIndex
+		});
+
+		let cancelled = false;
+
+		const loadMedia = async () => {
+			isCleaningUpRef.current = false;
+			hasReportedStartRef.current = false;
+			if (prevItemIdRef.current !== item.Id) {
+				transcodeRetryCountRef.current = 0;
+				forceHlsJsRef.current = false;
+				prevItemIdRef.current = item.Id;
+			}
+			setIsLoading(true);
+			setError(null);
+			scrubHoldRef.current = {active: false, wasPlaying: false, ticks: null};
+			setMediaSegments(null);
+			setHasTriedTranscode(false);
+			setCurrentTime(0);
+			setSeekPosition(0);
+			setIsSeeking(false);
+			setSubtitleTrackEvents(null);
+			setCurrentSubtitleText(null);
+			setSelectedSubtitleIndex(-1);
+			setVideoDisplayAspectRatio(null);
+			setDecodedAspectRatio(null);
+			burnInSubtitleRef.current = null;
+			// The player isn't remounted between items, and a next item with subtitles off
+			// or burned in never reaches loadSubtitleData to clear these.
+			pgsInitGenRef.current++;
+			disposePgsRenderer(pgsRendererRef.current);
+			pgsRendererRef.current = null;
+			pgsInitRef.current = null;
+			disposeAssRenderer(assRendererRef.current);
+			assRendererRef.current = null;
+			clearAssCanvas(assCanvasRef.current);
+
+			resetPopups(); // eslint-disable-line no-use-before-define
+			setNextEpisode(null);
+
+			await waitForDecoderRelease();
+
+			try {
+				const savedPosition = isLiveTV ? 0 : (item.UserData?.PlaybackPositionTicks || 0);
+				// A group position is exact; rewinding it only gets the set
+				// seeked forward again by the server.
+				const startPosition = applyResumeRewind(
+					initialStartPositionTicks != null ? initialStartPositionTicks : ((!isLiveTV && resume !== false) ? savedPosition : 0),
+					isInGroup ? null : settings
+				);
+				console.log('[Player] Start position:', {
+					resume,
+					savedPosition,
+					startPosition,
+					isLiveTV,
+					hasUserData: !!item.UserData
+				});
+				const playbackInfoOptions = {
+					startPositionTicks: startPosition,
+					maxBitrate: selectedQuality || settings.maxBitrate,
+					enableDirectPlay: directAllowed,
+					enableDirectStream: directAllowed,
+					forceDirectPlay: (isLiveTV || forceTranscode) ? false : settings.forceDirectPlay,
+					mediaSourceId: initialMediaSourceId,
+					audioStreamIndex: initialAudioIndex != null ? initialAudioIndex : undefined,
+					subtitleStreamIndex: initialSubtitleIndex,
+					item: item,
+					isLiveTV,
+					stereoUpmixEnabled: settings.stereoUpmixEnabled
+				};
+				let result = await playback.getPlaybackInfo(item.Id, playbackInfoOptions);
+
+				// The local track preferences win, otherwise honor the Jellyfin user's
+				// preferred audio language via the server-computed defaultAudioStreamIndex
+				// (#186), then the file's default track. Renegotiation below never
+				// changes the audio streams, so this is safe to settle first.
+				const defaultAudio = result.audioStreams?.find(s => s.isDefault);
+				// A track remembered for the series stands in front of the language
+				// preferences, the same order the other clients take these in.
+				const rememberedAudio = await resolveSeriesAudio(item, result.audioStreams);
+				const preferredAudio = selectPreferredAudioStream(result.audioStreams, settings);
+				const serverAudio = result.audioStreams?.find(s => s.index === result.defaultAudioStreamIndex);
+				const autoAudio = rememberedAudio || preferredAudio || serverAudio || defaultAudio;
+				const startingAudio = initialAudioIndex != null
+					? result.audioStreams?.find(s => s.index === initialAudioIndex)
+					: autoAudio;
+
+				// A remux or transcode carries only the track the server built it around, so
+				// switching on the player cant reach any other one. Direct play gets the
+				// whole file and switches locally. The index stays on the options so a
+				// later renegotiation keeps it.
+				let audioNegotiated = false;
+				if (initialAudioIndex == null && autoAudio && !isLiveTV
+					&& result.playMethod !== playback.PlayMethod.DirectPlay
+					&& autoAudio.index !== result.selectedAudioStreamIndex) {
+					try {
+						playbackInfoOptions.audioStreamIndex = autoAudio.index;
+						result = await playback.getPlaybackInfo(item.Id, playbackInfoOptions);
+						audioNegotiated = true;
+					} catch (err) {
+						console.error('[Player] Audio track negotiation failed:', err);
+					}
+				}
+
+				// The subtitle track has to be settled before the url reaches the video
+				// element, because a burn in one needs the stream negotiated again and
+				// swapping the source afterwards would restart playback.
+				const initialSubtitleChoice = await resolveInitialSubtitle(result, item, initialSubtitleIndex, settings, startingAudio);
+				if (initialSubtitleChoice?.isBurnIn) {
+					let bakedIn = initialSubtitleChoice.index === initialSubtitleIndex;
+					if (!bakedIn) {
+						try {
+							result = await playback.getPlaybackInfo(item.Id, {
+								...playbackInfoOptions,
+								subtitleStreamIndex: initialSubtitleChoice.index
+							});
+							bakedIn = true;
+						} catch (err) {
+							console.error('[Player] Burn in subtitle negotiation failed:', err);
+						}
+					}
+					if (bakedIn) burnInSubtitleRef.current = initialSubtitleChoice.index;
+				}
+
+				setMediaUrl(result.url);
+				setMimeType(result.mimeType || 'video/mp4');
+				setPlayMethod(result.playMethod);
+				setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
+				setMediaSourceId(result.mediaSourceId);
+				liveRecovery?.tuned();
+				setVideoDisplayAspectRatio(getVideoDisplayAspectRatio(result.mediaSource));
+				playSessionRef.current = result.playSessionId;
+
+				positionRef.current = startPosition;
+				lastSeekTargetRef.current = null;
+				seekingTranscodeRef.current = false;
+
+				// Defer seek until pipeline is running
+				if (!isLiveTV && startPosition > 0) {
+					pendingResumeTicksRef.current = startPosition;
+					console.log('[Player] Pending resume seek:', startPosition, 'ticks (' + (startPosition / 10000000) + 's)');
+				} else {
+					pendingResumeTicksRef.current = 0;
+				}
+
+
+				runTimeRef.current = result.runTimeTicks || 0;
+				setDuration((result.runTimeTicks || 0) / 10000000);
+
+				setAudioStreams(result.audioStreams || []);
+				setSubtitleStreams(result.subtitleStreams || []);
+
+				// Chapters are an Item property, not MediaSource - result.chapters may be empty
+				let chapterList = [];
+					if (!isLiveTV) {
+						chapterList = result.chapters || [];
+						if (chapterList.length === 0) {
+							chapterList = await playback.fetchItemChapters(item.Id, item);
+						}
+					}
+				setChapters(chapterList);
+
+				if (initialAudioIndex !== undefined && initialAudioIndex !== null) {
+					setSelectedAudioIndex(initialAudioIndex);
+					// Store for onFirstTimeUpdate to apply via audioTracks API
+					pendingAudioRef.current = {
+						streamIndex: initialAudioIndex,
+						audioStreams: result.audioStreams || []
+					};
+				} else if (autoAudio) {
+					setSelectedAudioIndex(autoAudio.index);
+					// Only switch via the audioTracks API when it isn't the file's native default
+					pendingAudioRef.current = !audioNegotiated && autoAudio.index !== defaultAudio?.index
+						? {streamIndex: autoAudio.index, audioStreams: result.audioStreams || []}
+						: null;
+				}
+
+				const audioCaps = playback.getCurrentSession()?.capabilities;
+				const videoSupport = await readVideoSupport();
+				serverLogger.playback('Playback: media opened', {
+					itemId: item?.Id,
+					playMethod: result.playMethod,
+					container: result.mediaSource?.Container,
+					videoStream: describeVideoStream(findVideoStream(result.mediaSource)),
+					videoSupport,
+					forceDirectPlay: Boolean(playbackInfoOptions.forceDirectPlay),
+					forceTruehdPassthrough: Boolean(settings.forceTruehdPassthrough),
+					audioOutputStatus: audioCaps?.audioOutputStatus,
+					defaultAudioStreamIndex: result.defaultAudioStreamIndex,
+					selectedAudioStreamIndex: result.selectedAudioStreamIndex,
+					audioLanguageSetting: settings.audioLanguage,
+					audioStreams: (result.audioStreams || []).map((s) => ({
+						index: s.index,
+						codec: s.codec,
+						profile: s.profile,
+						channels: s.channels,
+						language: s.language,
+						isDefault: s.isDefault
+					}))
+				});
+
+				// Load subtitle data or renderer for the selected stream.
+				const loadSubtitleData = async (sub) => {
+					pgsInitGenRef.current++;
+					disposePgsRenderer(pgsRendererRef.current);
+					pgsRendererRef.current = null;
+					pgsInitRef.current = null;
+					assInitGenRef.current++;
+					disposeAssRenderer(assRendererRef.current);
+					assRendererRef.current = null;
+					clearAssCanvas(assCanvasRef.current);
+					showHostSubtitle(videoRef.current, -1);
+
+					const supportsAss = sub && sub.isAss && supportsAssRenderer();
+					if (supportsAss) {
+						// The canvas is always mounted, so the renderer boots alongside the rest of
+						// the start. Its worker fetches and parses the whole track and its fonts,
+						// which takes seconds on a slow TV, so the start only waits on it when the
+						// viewer would rather not miss the first lines.
+						setSubtitleTrackEvents(null);
+						if (settings.waitForAssSubtitles) {
+							await initAssRendererForStream(sub, {waitMs: ASS_READY_WAIT});
+						} else {
+							initAssRendererForStream(sub);
+						}
+					} else if (sub && sub.hostRendered) {
+						showHostSubtitle(videoRef.current, sub.index);
+						setSubtitleTrackEvents(null);
+					} else if (sub && sub.isTextBased) {
+						loadTextTrack(sub);
+					} else if (sub && sub.isImageBased && settings.enablePgsRendering) {
+						await initPgsRendererForStream(sub);
+					} else {
+						setSubtitleTrackEvents(null);
+					}
+
+					setCurrentSubtitleText(null);
+				};
+
+				const turnSubtitlesOff = () => {
+					setSelectedSubtitleIndex(-1);
+					setSubtitleTrackEvents(null);
+					showHostSubtitle(videoRef.current, -1);
+				};
+				if (initialSubtitleChoice === null) {
+					turnSubtitlesOff();
+				} else if (initialSubtitleChoice) {
+					setSelectedSubtitleIndex(initialSubtitleChoice.index);
+					// A burn in track is already part of the video by now, so there is
+					// nothing to fetch and render on top of it.
+					if (!initialSubtitleChoice.isBurnIn) await loadSubtitleData(initialSubtitleChoice);
+				}
+				// Waiting on the subtitles can outlast this item, and whatever replaced it owns
+				// the player now.
+				if (cancelled) return;
+
+				let displayTitle = item.Name;
+				let displaySubtitle = '';
+				if (isLiveTV) {
+					displayTitle = item.Name || 'Live TV';
+					displaySubtitle = item.ChannelNumber ? `Channel ${item.ChannelNumber}` : '';
+				} else if (item.SeriesName) {
+					displayTitle = item.SeriesName;
+					displaySubtitle = `S${item.ParentIndexNumber}:E${item.IndexNumber} - ${item.Name}`;
+				} else if (result.isAudio) {
+					displayTitle = item.Name;
+					displaySubtitle = item.AlbumArtist || item.Artists?.[0] || item.Album || '';
+				}
+				const shouldUseAudioMode = !!result.isAudio || item?.MediaType === 'Audio' || item?.Type === 'Audio';
+				setTitle(displayTitle);
+				setSubtitle(displaySubtitle);
+				setLogoUrl(isLiveTV ? null : getLogoUrl(item?._serverUrl || getServerUrl(), item, {maxWidth: 800, quality: 90}));
+				setIsAudioMode(shouldUseAudioMode);
+				setFocusRow('bottom');
+				setIsFavorite(!!item.UserData?.IsFavorite);
+
+				// Audio mode: always show controls, skip video-only features
+				if (shouldUseAudioMode) {
+					setControlsVisible(true);
+				} else if (!isLiveTV) {
+					withTimeout(playback.getMediaSegments(item.Id), SEGMENT_FETCH_TIMEOUT).then((segments) => {
+						if (!cancelled) setMediaSegments(segments);
+					}).catch((segmentErr) => {
+						console.warn('[Player] Media segment fetch skipped:', segmentErr?.message || segmentErr);
+					});
+
+					// A queue sets its own order. Running off the end of one, or playing a
+					// lone episode, falls back to the air order lookup.
+					const queued = nextInQueue(videoQueueRef.current, item);
+					if (queued) {
+						setNextEpisode(queued);
+					} else if (item.Type === 'Episode') {
+						playback.getNextEpisode(item).then(setNextEpisode);
+					}
+				}
+
+				console.log(`[Player] Loaded ${displayTitle} via ${result.playMethod}${isLiveTV ? ' [Live TV]' : ''}`);
+			} catch (err) {
+				console.error('[Player] Failed to load media:', err);
+				// A pre-roll that cant even load gets skipped, not surfaced.
+				const skipTo = isPreroll(item) ? nextInQueue(videoQueueRef.current, item) : null;
+				if (skipTo && onPlayNext) {
+					onPlayNext(skipTo);
+				} else {
+					setError(err.message || $L('Failed to load media'));
+				}
+			} finally {
+				if (!cancelled) setIsLoading(false);
+			}
+		};
+
+		loadMedia();
+
+		return () => {
+			cancelled = true;
+			assInitGenRef.current++; // eslint-disable-line react-hooks/exhaustive-deps
+			console.log('[Player] Cleanup running - unmounting or re-rendering');
+
+			if (isCleaningUpRef.current) {
+				console.log('[Player] Skipping cleanup - already handled by handleBack/handleEnded');
+				playback.stopProgressReporting();
+				playback.stopHealthMonitoring();
+				resetPopups(); // eslint-disable-line no-use-before-define
+				if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+				if (seekDebounceTimerRef.current) clearTimeout(seekDebounceTimerRef.current);
+				clearTimeout(scrubSettleTimerRef.current);
+				pgsInitGenRef.current++; // eslint-disable-line react-hooks/exhaustive-deps
+				disposePgsRenderer(pgsRendererRef.current);
+				pgsInitRef.current = null;
+				disposeAssRenderer(assRendererRef.current);
+				clearAssCanvas(assCanvas);
+				return;
+			}
+
+			const videoTime = videoElement ? videoElement.currentTime : 0;
+			const videoTicks = Math.floor(videoTime * 10000000);
+			const currentPos = videoTicks > 0 ? videoTicks : positionRef.current;
+
+			// Report stop whenever a session is still open. A normal back-out has
+			// already stopped and cleared it. Don't gate on position, live TV and
+			// freshly opened media sit at 0 and would otherwise leak.
+			if (playback.getCurrentSession()) {
+				playback.reportStop(currentPos);
+			}
+
+			playback.stopProgressReporting();
+			playback.stopHealthMonitoring();
+
+			resetPopups(); // eslint-disable-line no-use-before-define
+			if (controlsTimeoutRef.current) {
+				clearTimeout(controlsTimeoutRef.current);
+			}
+			if (seekDebounceTimerRef.current) {
+				clearTimeout(seekDebounceTimerRef.current);
+			}
+			clearTimeout(scrubSettleTimerRef.current);
+
+			isCleaningUpRef.current = true;
+			destroyHlsPlayer();
+			if (videoElement) {
+				try { videoElement.pause(); } catch (e) { /* ignore */ }
+				while (videoElement.firstChild) videoElement.removeChild(videoElement.firstChild);
+				videoElement.src = '';
+				videoElement.removeAttribute('src');
+				if (videoElement.srcObject) {
+					videoElement.srcObject = null;
+				}
+			}
+		};
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [item, resume, onPlayNext, selectedQuality, settings.maxBitrate, settings.preferTranscode, settings.forceDirectPlay, settings.forceTruehdPassthrough, forceTranscode, settings.subtitleMode, settings.introAction, settings.outroAction, initialAudioIndex, initialSubtitleIndex, tuneRevision, loadTextTrack]);
+
+	// Another client can queue more while this plays, and what it puts behind this plays next.
+	useEffect(() => {
+		const queued = nextInQueue(videoQueue, item);
+		if (queued) setNextEpisode(queued);
+	}, [videoQueue, item]);
+
+	useEffect(() => {
+		if (mediaUrl) {
+			mediaUrlRef.current = mediaUrl;
+		}
+	}, [mediaUrl]);
+
+
+
+	// Every user seek inside a group goes through here to the server, which then
+	// seeks everyone. A local seek would only be reported as buffering and
+	// undone by the next group command. positionRef is left alone so the
+	// group's Seek command still measures as a real move when it comes back.
+	// Returns false outside a group so callers fall through to a local seek.
+	const groupSeekTo = useCallback((ticks, debounce = false) => {
+		if (!isInGroup || syncPlayCommandRef.current) return false;
+		const limit = runTimeRef.current > 0 ? runTimeRef.current - 10000000 : ticks;
+		const target = Math.max(0, Math.min(ticks, limit));
+		clearTimeout(groupSeekTimerRef.current);
+		groupSeekTargetRef.current = target;
+		setSeekPosition(target);
+		const send = () => {
+			groupSeekTimerRef.current = null;
+			groupSeekTargetRef.current = null;
+			syncPlayService.sendSeekRequest(target);
+		};
+		if (debounce) {
+			groupSeekTimerRef.current = setTimeout(send, GROUP_SEEK_DEBOUNCE_MS);
+		} else {
+			send();
+		}
+		return true;
+	}, [isInGroup]);
+
+	// A pending group seek is meaningless once the group is left or the server
+	// has moved everyone itself.
+	const cancelGroupSeek = useCallback(() => {
+		clearTimeout(groupSeekTimerRef.current);
+		groupSeekTimerRef.current = null;
+		groupSeekTargetRef.current = null;
+	}, []);
+
+	const clearGroupSeekPending = useCallback(() => {
+		clearTimeout(groupSeekSettleTimerRef.current);
+		groupSeekSettleTimerRef.current = null;
+		groupSeekPendingRef.current = null;
+	}, []);
+
+	// Paused before its first frame, this pipeline shows black rather than
+	// the frame at the position, and a set joining a paused group sits on a
+	// black screen until someone presses play. A seek to where it already is
+	// makes it draw one. Not on a transcode, where a seek restarts the stream.
+	const showFrameIfNone = useCallback(() => {
+		const video = videoRef.current;
+		if (!video || renderedRef.current || !video.paused || groupSeekPendingRef.current) return;
+		if (playMethod === playback.PlayMethod.Transcode) return;
+		const at = video.currentTime;
+		// A pipeline that has not drawn yet may not report its position yet
+		// either, and a seek to a reading like that would move the set.
+		if (Math.abs(at * 10000000 - positionRef.current) > 10000000) return;
+		syncLog('[Player] no frame drawn yet, seeking in place at', at);
+		video.currentTime = at;
+	}, [playMethod]);
+
+	// Held for the group: the server says when and where playback starts. A
+	// seek in flight on its behalf is the one thing allowed to run.
+	const holdForGroup = useCallback(() => {
+		if (groupHoldRef.current && !groupSeekPendingRef.current && videoRef.current) videoRef.current.pause();
+	}, []);
+
+	useEffect(() => {
+		if (!isInGroup) {
+			// Leaving while still held for the group would leave the set sat
+			// paused at the start, so it goes on by itself.
+			if (groupHoldRef.current && videoRef.current?.paused) videoRef.current.play()?.catch?.(() => {});
+			groupHoldRef.current = false;
+		}
+		return () => {
+			cancelGroupSeek();
+			clearGroupSeekPending();
+		};
+	}, [isInGroup, cancelGroupSeek, clearGroupSeekPending]);
+
+	const seekByOffset = useCallback((deltaSec, updateSeekPosition) => {
+		if (isInGroup && !syncPlayCommandRef.current) {
+			// Presses accumulate on the pending target so a burst lands once.
+			const base = groupSeekTargetRef.current != null ? groupSeekTargetRef.current : positionRef.current;
+			groupSeekTo(base + Math.floor(deltaSec * 10000000), true);
+			return;
+		}
+		const baseTime = (playMethod === 'Transcode')
+			? ((lastSeekTargetRef.current != null ? lastSeekTargetRef.current : positionRef.current) / 10000000)
+			: (videoRef.current ? videoRef.current.currentTime : 0);
+		const maxSeek = Math.max(0, duration - 1);
+		const newTime = Math.max(0, Math.min(maxSeek, baseTime + deltaSec));
+		const newTicks = Math.floor(newTime * 10000000);
+		if (updateSeekPosition) setSeekPosition(newTicks);
+		positionRef.current = newTicks;
+		lastSeekTargetRef.current = newTicks;
+		if (playMethod === 'Transcode') {
+			if (seekDebounceTimerRef.current) clearTimeout(seekDebounceTimerRef.current);
+			seekDebounceTimerRef.current = setTimeout(() => {
+				lastSeekTimeRef.current = Date.now();
+				if (healthMonitorRef.current) healthMonitorRef.current.reset();
+				// The last timeupdate is from before the seek, and a scrub's bar falls back to it.
+				setCurrentTime(newTime);
+				try {
+					videoRef.current.currentTime = newTime;
+				} catch (e) {
+					console.warn('[Player] seekByOffset: failed to set currentTime:', e);
+				}
+			}, 600);
+		} else if (videoRef.current) {
+			lastSeekTimeRef.current = Date.now();
+			if (healthMonitorRef.current) healthMonitorRef.current.reset();
+			setCurrentTime(newTime);
+			try {
+				videoRef.current.currentTime = newTime;
+			} catch (e) {
+				console.warn('[Player] seekByOffset: failed to set currentTime:', e);
+			}
+		}
+	}, [duration, playMethod, isInGroup, groupSeekTo]);
+
+	const seekToTicks = useCallback((ticks) => {
+		// 1s before the end, or unclamped while the runtime is still unknown,
+		// which would otherwise send every seek to the start.
+		const maxTicks = runTimeRef.current > 10000000 ? runTimeRef.current - 10000000 : Infinity;
+		const clampedTicks = Math.max(0, Math.min(ticks, maxTicks));
+		positionRef.current = clampedTicks;
+		lastSeekTargetRef.current = null;
+		// Same as seekByOffset, or committing a held scrub shows where it started.
+		setCurrentTime(clampedTicks / 10000000);
+		if (playMethod === 'Transcode') {
+			lastSeekTimeRef.current = Date.now();
+			if (healthMonitorRef.current) healthMonitorRef.current.reset();
+			try {
+				videoRef.current.currentTime = clampedTicks / 10000000;
+			} catch (e) {
+				console.warn('[Player] seekToTicks: failed to set currentTime:', e);
+			}
+		} else if (videoRef.current) {
+			lastSeekTimeRef.current = Date.now();
+			if (healthMonitorRef.current) healthMonitorRef.current.reset();
+			try {
+				videoRef.current.currentTime = clampedTicks / 10000000;
+			} catch (e) {
+				console.warn('[Player] seekToTicks: failed to set currentTime:', e);
+			}
+		}
+		return clampedTicks;
+	}, [playMethod]);
+
+	// The commanded seek is over, whether the position arrived or the wait ran
+	// out. Either way the set reports Ready with where it really is: the server
+	// answers a wrong position by sending the seek again.
+	const settleGroupSeek = useCallback(() => {
+		const pending = groupSeekPendingRef.current;
+		if (!pending) return;
+		clearGroupSeekPending();
+		const video = videoRef.current;
+		syncLog('[Player] SyncPlay seek settled at', syncPlaySample().positionTicks / 10000000, 's, target', pending.target / 10000000, 's');
+		if (pending.pauseOnLand && video) {
+			video.pause();
+			// The set played on for a moment between landing and pausing, and
+			// the server sends the seek again for anything over half a second
+			// off, which would go round forever. A paused seek puts it exactly
+			// on the target.
+			if (needsSeek(syncPlaySample().positionTicks, pending.target)) seekToTicks(pending.target);
+		}
+		if (isInGroup) readyGate.request();
+	}, [clearGroupSeekPending, seekToTicks, readyGate, isInGroup, syncPlaySample]);
+
+	const settleGroupSeekIfLanded = useCallback(() => {
+		const pending = groupSeekPendingRef.current;
+		if (!pending || !videoRef.current || videoRef.current.seeking) return;
+		if (seekLanded(pending.from, pending.target, syncPlaySample().positionTicks)) settleGroupSeek();
+	}, [settleGroupSeek, syncPlaySample]);
+
+	const handleSeeked = useCallback(() => {
+		// libpgs keeps an ascending list of subtitle timestamps, so a seek back behind
+		// the data already handed to it needs a fresh renderer rather than a seek.
+		const renderer = pgsRendererRef.current;
+		if (renderer?.needsRestart && renderer.needsRestart(videoRef.current?.currentTime || 0)) {
+			disposePgsRenderer(renderer);
+			pgsRendererRef.current = null;
+			pgsInitRef.current?.();
+		}
+		settleGroupSeekIfLanded();
+	}, [settleGroupSeekIfLanded]);
+
+	// A seek on the group's behalf. The server holds the group until this set
+	// reports Ready, so the report waits for the seek to land. A Seek command
+	// leaves the set paused there for the Unpause that follows once everyone
+	// has arrived.
+	const startGroupSeek = useCallback((target, pauseOnLand, playToSeek = false) => {
+		const video = videoRef.current;
+		if (!video) return;
+		const pending = groupSeekPendingRef.current;
+		if (pending && !needsSeek(pending.target, target)) {
+			// Already on its way there.
+			pending.pauseOnLand = pending.pauseOnLand || pauseOnLand;
+			return;
+		}
+		if (!pending && !needsSeek(positionRef.current, target)) {
+			syncLog('[Player] SyncPlay seek to', target / 10000000, 's already there');
+			if (pauseOnLand) video.pause();
+			if (isInGroup) readyGate.request();
+			return;
+		}
+		clearGroupSeekPending();
+		const from = syncPlaySample().positionTicks;
+		syncLog('[Player] SyncPlay seek from', from / 10000000, 's to', target / 10000000, 's', {pauseOnLand, playToSeek, paused: video.paused, readyState: video.readyState});
+		// The hold lets a seek on the group's behalf run, so it has to be on
+		// record before the pipeline is started for it. A seek lands sooner
+		// with the pipeline running: unpause, seek, pause once it is there.
+		groupSeekPendingRef.current = {from, target, pauseOnLand};
+		if (playToSeek && video.paused) video.play()?.catch?.(() => {});
+		groupSeekPendingRef.current.target = seekToTicks(target);
+		groupSeekSettleTimerRef.current = setTimeout(() => {
+			console.warn('[Player] Group seek did not land within', GROUP_SEEK_SETTLE_TIMEOUT_MS, 'ms, reporting as is');
+			settleGroupSeek();
+		}, GROUP_SEEK_SETTLE_TIMEOUT_MS);
+	}, [clearGroupSeekPending, seekToTicks, settleGroupSeek, readyGate, isInGroup, syncPlaySample]);
+
+	useEffect(() => {
+		const video = videoRef.current;
+		console.log('[Player] Video src useEffect - video exists:', !!video, 'mediaUrl:', !!mediaUrl, 'isLoading:', isLoading, 'error:', !!error);
+
+		if (!video || !mediaUrl || isLoading || error) return;
+
+		console.log('[Player] Setting video src via ref:', mediaUrl);
+		console.log('[Player] PlayMethod:', playMethod, 'MimeType:', mimeType);
+
+		// autoplay must be re-set because hls.js path overrides it to false
+		video.autoplay = true;
+
+		video.muted = false;
+		video.defaultMuted = false;
+		video.volume = 1;
+		video.removeAttribute('muted');
+
+		const setSourceAndPlay = () => {
+			console.log('[Player] Setting video source now');
+
+			destroyHlsPlayer();
+
+			let srcUrl = mediaUrl;
+			const isHls = mimeType === 'application/x-mpegURL' || mediaUrl.includes('.m3u8');
+			const resumeTicks = pendingResumeTicksRef.current;
+			if (resumeTicks > 0 && !isHls && resumesAfterFirstFrame(playback.getCurrentSession()?.mediaSource)) {
+				// Where a seek made before the first frame shows never lands, the file is
+				// opened at its start and the resume waits for that frame.
+				video.addEventListener('loadeddata', () => {
+					if (video.src === mediaUrl && pendingResumeTicksRef.current > 0) video.currentTime = pendingResumeTicksRef.current / 10000000;
+				}, {once: true});
+			} else if (resumeTicks > 0) {
+				const resumeSec = resumeTicks / 10000000;
+				srcUrl = mediaUrl + '#t=' + resumeSec;
+				console.log('[Player] Appending media fragment #t=' + resumeSec + ' for resume (' + resumeTicks + ' ticks)');
+			}
+
+			// forceHlsJsRef overrides native when HEVC decoding already failed
+			const nativeHlsOk = !forceHlsJsRef.current
+				&& !!(video.canPlayType('application/x-mpegURL').replace(/no/, ''));
+			const useHlsJs = isHls && !nativeHlsOk && Hls.isSupported();
+			console.log('[Player] Source type:', { isHls, mimeType, autoplay: video.autoplay, platformVersion: platformVersionRef.current, nativeHlsOk, useHlsJs, forceHlsJs: forceHlsJsRef.current });
+
+			while (video.firstChild) video.removeChild(video.firstChild);
+			video.removeAttribute('src');
+			video.load();
+
+			if (useHlsJs) {
+				console.log('[Player] Using hls.js for HLS playback (platform version ' + platformVersionRef.current + ')');
+				const hls = new Hls({
+					enableWorker: false,
+					lowLatencyMode: false,
+					maxBufferLength: 30,
+					maxMaxBufferLength: 60,
+					startFragPrefetch: true,
+					maxBufferHole: 0.5,
+					nudgeMaxRetry: 5,
+				});
+				hlsPlayerRef.current = hls;
+				let hlsPlayStarted = false;
+				let fragBufferedCount = 0;
+				let stallCount = 0;
+
+				hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+					console.log('[Player] hls.js manifest parsed, levels:', data.levels?.length, 'waiting for first fragment...');
+				});
+
+				const fragStartThreshold = isLiveTV ? 1 : 2;
+				hls.on(Hls.Events.FRAG_BUFFERED, () => {
+					fragBufferedCount++;
+					if (hlsPlayStarted) return;
+					if (fragBufferedCount < fragStartThreshold) {
+						console.log('[Player] hls.js fragment buffered (' + fragBufferedCount + '/' + fragStartThreshold + '), waiting for more data...');
+						return;
+					}
+					hlsPlayStarted = true;
+					console.log('[Player] hls.js ' + fragBufferedCount + ' fragments buffered, starting playback');
+					const p = video.play();
+					if (p && typeof p.then === 'function') {
+						p.then(() => console.log('[Player] hls.js play() resolved'))
+						 .catch(e => {
+							 if (e.name === 'AbortError') {
+								 console.log('[Player] hls.js play() aborted - expected');
+							 } else {
+								 console.error('[Player] hls.js play() rejected:', e);
+							 }
+						 });
+					}
+				});
+
+				hls.on(Hls.Events.FRAG_LOADING, (event, data) => {
+					console.log('[Player] hls.js loading fragment:', data.frag?.sn);
+				});
+
+				hls.on(Hls.Events.ERROR, (event, data) => {
+					console.error('[Player] hls.js error:', data.type, data.details, 'fatal:', data.fatal);
+
+					if (hlsPlayStarted && !data.fatal && (
+						data.details === 'bufferStalledError' ||
+						data.details === 'bufferNudgeOnStall'
+					)) {
+						stallCount++;
+						if (stallCount === 3 && video.currentTime < 1) {
+							console.log('[Player] hls.js persistent stall at', video.currentTime, '- force-seeking to 0.5s');
+							video.currentTime = 0.5;
+						} else if (stallCount === 6 && video.currentTime < 2) {
+							console.log('[Player] hls.js still stalling at', video.currentTime, '- recovering media error');
+							hls.recoverMediaError();
+						}
+					}
+
+					if (data.fatal) {
+						switch (data.type) {
+							case Hls.ErrorTypes.NETWORK_ERROR:
+								// Retrying a live channel forever would never give its tuner back, so
+								// it goes to the live recovery, which has a budget.
+								if (isLiveTV) {
+									video.dispatchEvent(new Event('error'));
+									break;
+								}
+								console.log('[Player] hls.js fatal network error - attempting recovery');
+								hls.startLoad();
+								break;
+							case Hls.ErrorTypes.MEDIA_ERROR:
+								console.log('[Player] hls.js fatal media error - attempting recovery');
+								hls.recoverMediaError();
+								break;
+							default:
+								console.error('[Player] hls.js unrecoverable error - dispatching error event');
+								video.dispatchEvent(new Event('error'));
+								break;
+						}
+					}
+				});
+
+				video.autoplay = false; // play() called from FRAG_BUFFERED instead
+				hls.attachMedia(video);
+				hls.loadSource(srcUrl);
+			} else {
+				destroyHlsPlayer();
+				video.src = srcUrl;
+				// Pass DV / codec hints so Starfish can activate the right decoder
+				if (mimeType) video.type = mimeType;
+				video.load();
+			}
+
+			if (playbackStartTimeoutRef.current) {
+				clearTimeout(playbackStartTimeoutRef.current);
+			}
+			let resumeHandled = false;
+			const onFirstTimeUpdate = () => {
+				if (!resumeHandled) {
+					resumeHandled = true;
+					clearTimeout(playbackStartTimeoutRef.current);
+					playbackStartTimeoutRef.current = null;
+					playbackStartTimedOutRef.current = false;
+					sourceTransitionRef.current = false;
+					transcodeRetryCountRef.current = 0;
+					if (pendingResumeTicksRef.current > 0) {
+						const seekSec = pendingResumeTicksRef.current / 10000000;
+						if (video.currentTime < seekSec * 0.5) {
+							console.log('[Player] #t= fragment did not seek - using currentTime fallback:', seekSec, 's');
+							video.currentTime = seekSec;
+						} else {
+							console.log('[Player] Resume via #t= fragment successful, position:', video.currentTime, 's');
+						}
+						pendingResumeTicksRef.current = 0;
+					}
+				}
+
+				// audioTracks may not be populated on the first timeupdate,
+				// so retry on subsequent events until applied or no longer needed
+				const pending = pendingAudioRef.current;
+				if (pending) {
+					if (video.audioTracks?.length > 1) {
+						const matchIndex = matchAudioTrack(video.audioTracks, pending.audioStreams, pending.streamIndex);
+						if (matchIndex >= 0) {
+							for (let i = 0; i < video.audioTracks.length; i++) {
+								video.audioTracks[i].enabled = (i === matchIndex);
+							}
+							console.log('[Player] Applied initial audio track via audioTracks API, index:', pending.streamIndex, 'matchIndex:', matchIndex);
+						}
+						pendingAudioRef.current = null;
+					} else if (video.audioTracks?.length > 0) {
+						// Single audio track, nothing to switch
+						pendingAudioRef.current = null;
+					}
+				}
+
+				if (!pendingAudioRef.current) {
+					video.removeEventListener('timeupdate', onFirstTimeUpdate);
+				}
+			};
+			video.addEventListener('timeupdate', onFirstTimeUpdate);
+			const timeoutMs = 120000;
+			playbackStartTimeoutRef.current = setTimeout(() => {
+				video.removeEventListener('timeupdate', onFirstTimeUpdate);
+				sourceTransitionRef.current = false;
+				const expectedStart = resumeTicks > 0 ? resumeTicks / 10000000 : 0;
+				const noProgress = expectedStart > 0
+					? (video.currentTime < expectedStart * 0.5 && (video.readyState < 3 || video.paused))
+					: (video.currentTime === 0 && (video.readyState < 3 || video.paused));
+				if (noProgress) {
+					console.warn('[Player] Playback start timeout - no timeupdate received in ' + (timeoutMs / 1000) + 's, triggering error handler');
+					console.warn('[Player] Video state:', { readyState: video.readyState, networkState: video.networkState, paused: video.paused, currentSrc: video.currentSrc });
+					playbackStartTimedOutRef.current = true;
+					video.dispatchEvent(new Event('error'));
+				}
+			}, timeoutMs);
+
+			if (!useHlsJs) {
+				const playResult = video.play();
+				if (playResult && typeof playResult.then === 'function') {
+					playResult.then(() => {
+						console.log('[Player] play() promise resolved');
+					}).catch(err => {
+						if (err.name === 'AbortError') {
+							console.log('[Player] play() aborted (source transition) - expected');
+						} else {
+							console.error('[Player] play() promise rejected:', err);
+						}
+					});
+				}
+			}
+		};
+
+		const startDelayMs = Math.max(0, Number(settings.videoStartDelay || 0) * 1000);
+		let startDelayTimer = null;
+		if (startDelayMs > 0) {
+			startDelayTimer = setTimeout(() => {
+				setSourceAndPlay();
+			}, startDelayMs);
+		} else {
+			setSourceAndPlay();
+		}
+
+		return () => {
+			if (startDelayTimer) {
+				clearTimeout(startDelayTimer);
+			}
+			if (playbackStartTimeoutRef.current) {
+				clearTimeout(playbackStartTimeoutRef.current);
+				playbackStartTimeoutRef.current = null;
+			}
+			destroyHlsPlayer();
+		};
+	}, [mediaUrl, isLoading, mimeType, playMethod, error, settings.videoStartDelay, isLiveTV, sourceRevision]);
+
+	const showControls = useCallback((isModalOpen = activeModal) => {
+		setControlsVisible(true);
+		if (controlsTimeoutRef.current) {
+			clearTimeout(controlsTimeoutRef.current);
+		}
+		if (!isAudioMode && !isModalOpen) {
+			controlsTimeoutRef.current = setTimeout(() => {
+				// Paused playback keeps its controls, like the other clients. Resuming
+				// goes through showControls and re-arms the timer.
+				if (isPausedRef.current) return;
+				setControlsVisible(false);
+			}, CONTROLS_HIDE_DELAY);
+		}
+	}, [activeModal, isAudioMode]);
+
+	const hideControls = useCallback(() => {
+		setControlsVisible(false);
+		if (controlsTimeoutRef.current) {
+			clearTimeout(controlsTimeoutRef.current);
+		}
+	}, []);
+
+	// Handle playback health issues - if the health monitor detects stalled
+	// playback (no progress for extended period), fall back to transcoding.
+	const handleUnhealthy = useCallback(async () => {
+		if (Date.now() - lastSeekTimeRef.current < 15000 || videoRef.current?.paused) {
+			if (healthMonitorRef.current) healthMonitorRef.current.reset();
+			return;
+		}
+		console.log('[Player] Playback unhealthy, falling back to transcode');
+		if (!hasTriedTranscode && playMethod !== 'Transcode') {
+			const video = videoRef.current;
+			if (video) {
+				console.warn('[Player] Health monitor triggering transcode fallback');
+				video.dispatchEvent(new Event('error'));
+			}
+		}
+	}, [hasTriedTranscode, playMethod]);
+
+	// No track indexes travel along. The session only records an index the
+	// viewer asked for, so a subtitle the player picked on its own reads as
+	// minus one there, and handing that to the next episode would switch its
+	// subtitles off. A chosen track already carries over through the series
+	// preferences.
+	const onPlayNextWithCleanup = useCallback(async (episode) => {
+		// An outro skip lands near the end, so the next up countdown can come
+		// round again on the episode it already started, and reporting a stop
+		// for it would end the session that is still playing.
+		if (episode.Id === item.Id) return;
+		await playback.reportStop(positionRef.current);
+		onPlayNext(episode);
+	}, [onPlayNext, item.Id]);
+
+	const {carouselOpenRef, openCarousel, markChannelPlaying, carouselProps} = useChannelCarousel({
+		item, isLiveTV, liveTvChannels, sortBy: settings.liveTvChannelSortBy,
+		error, controlsVisible, showControls, hideControls, setFocusRow,
+		onSwitchChannel: onPlayNextWithCleanup
+	});
+
+	const onSeekToSegmentEnd = useCallback((endTicks) => {
+		if (!endTicks || !videoRef.current) return;
+		// Skipping inside a group skips the segment for everyone.
+		if (!groupSeekTo(endTicks)) seekToTicks(endTicks);
+	}, [seekToTicks, groupSeekTo]);
+
+	const {
+		skipSegment, showSkipCredits, showNextEpisode, nextEpisodeCountdown,
+		handleSkipSegment, handlePlayNextNow,
+		askStillWatching, handleStillWatchingContinue, handleStillWatchingStop, cancelNextEpisodeCountdown,
+		checkSegments, handlePopupKeyDown, resetPopups, noteViewerActivity
+	} = useSegmentPopups({
+		mediaSegments, nextEpisode, settings, runTimeRef,
+		activeModal, controlsVisible, hideControls, showControls,
+		onSeekToSegmentEnd,
+		onPlayNext: onPlayNextWithCleanup,
+		onPausePlayback: () => {
+			videoRef.current?.pause();
+			liveRecovery?.setPaused(true);
+		},
+		// Called long after the definition below, so reading it now would be too early.
+		onStopPlayback: () => handleBack(), // eslint-disable-line no-use-before-define
+		currentIsPreroll: isPreroll(item)
+	});
+
+	const handleLoadedMetadata = useCallback(() => {
+		if (videoRef.current) {
+			const width = Number(videoRef.current.videoWidth);
+			const height = Number(videoRef.current.videoHeight);
+			if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+				setDecodedAspectRatio(width / height);
+			}
+
+			setDuration(videoRef.current.duration);
+
+			const p = videoRef.current.play();
+			if (p && typeof p.catch === 'function') {
+				p.catch(err => {
+					console.error('[Player] Failed to start playback:', err);
+				});
+			}
+		}
+	}, []);
+
+	const handlePlay = useCallback(() => {
+		setIsPaused(false);
+		healthMonitorRef.current?.setPaused(false);
+		if (!hasReportedStartRef.current) {
+			hasReportedStartRef.current = true;
+			playback.reportStart(positionRef.current);
+			playback.startProgressReporting(
+				() => positionRef.current,
+				10000,
+				() => ({ isPaused: videoRef.current?.paused || false })
+			);
+			playback.startHealthMonitoring(handleUnhealthy);
+			healthMonitorRef.current = playback.getHealthMonitor();
+		} else {
+			playback.reportProgress(positionRef.current, { isPaused: false, eventName: 'unpause' });
+		}
+		holdForGroup();
+	}, [handleUnhealthy, holdForGroup]);
+
+	const handlePause = useCallback(() => {
+		setIsPaused(true);
+		healthMonitorRef.current?.setPaused(true);
+		liveRecovery?.update({playing: false});
+		playback.reportProgress(positionRef.current, { isPaused: true, eventName: 'pause' });
+	}, [liveRecovery]);
+
+	const handleTimeUpdate = useCallback(() => {
+		if (videoRef.current) {
+			const rawTime = videoRef.current.currentTime;
+			const time = rawTime;
+			setCurrentTime(time);
+			const ticks = Math.floor(time * 10000000);
+			if (ticks !== positionRef.current) {
+				stalledRef.current = false;
+				renderedRef.current = true;
+			}
+			skipGovernorRef.current.observe({
+				nowMs: Date.now(),
+				positionMs: time * 1000,
+				isPlaying: !videoRef.current.paused,
+				isBuffering: videoRef.current.seeking || stalledRef.current
+			});
+			// While a group seek is in flight the old buffer is still going by,
+			// so the position stays on the target and nothing seeks there twice.
+			const pending = groupSeekPendingRef.current;
+			if (!pending || seekLanded(pending.from, pending.target, ticks)) {
+				positionRef.current = ticks;
+				if (pending && !videoRef.current.seeking) settleGroupSeek();
+			}
+
+			// Canvas-mode ASS isn't auto-synced to the video, so drive its clock here.
+			if (assRendererRef.current) {
+				setAssTime(assRendererRef.current, time - subtitleOffset);
+			}
+
+			if (healthMonitorRef.current) {
+				healthMonitorRef.current.recordProgress();
+				healthMonitorRef.current.recordFrames(videoRef.current);
+			}
+
+			if (subtitleTrackEvents && subtitleTrackEvents.length > 0) {
+				const lookupTicks = ticks - (subtitleOffset * 10000000);
+
+				const matchingTexts = [];
+				for (const event of subtitleTrackEvents) {
+					if (lookupTicks >= event.StartPositionTicks && lookupTicks <= event.EndPositionTicks) {
+						matchingTexts.push(event.Text);
+					}
+				}
+				setCurrentSubtitleText(matchingTexts.length > 0 ? matchingTexts.join('\n') : null);
+			}
+
+			checkSegments(ticks);
+		}
+	}, [checkSegments, subtitleTrackEvents, subtitleOffset, settleGroupSeek]);
+
+	const handleWaiting = useCallback(() => {
+		setIsBuffering(true);
+		stalledRef.current = true;
+		liveRecovery?.update({buffering: true});
+		syncLog('[Player] waiting at', videoRef.current?.currentTime, videoRef.current?.paused ? 'paused' : 'playing');
+		if (healthMonitorRef.current && (Date.now() - lastSeekTimeRef.current > 15000)) {
+			healthMonitorRef.current.recordBuffer();
+		}
+	}, [liveRecovery]);
+
+	const handlePlaying = useCallback(() => {
+		markChannelPlaying();
+		setIsBuffering(false);
+		stalledRef.current = false;
+		liveRecovery?.update({playing: true, buffering: false});
+		syncLog('[Player] playing at', videoRef.current?.currentTime);
+		setIsPaused(false);
+		healthMonitorRef.current?.setPaused(false);
+		if (!seekDebounceTimerRef.current && !seekingTranscodeRef.current) {
+			lastSeekTargetRef.current = null;
+		}
+		holdForGroup();
+		// Playing with the group: the set takes a moment to actually move,
+		// and a drift read before it does is not one a skip could close.
+		if (isInGroup && !groupHoldRef.current) {
+			skipGovernorRef.current.onStart({nowMs: Date.now(), fromMs: positionRef.current / 10000});
+		}
+	}, [holdForGroup, isInGroup, markChannelPlaying, liveRecovery]);
+
+	const handleEnded = useCallback(async () => {
+		if (sourceTransitionRef.current) {
+			console.log('[Player] Ignoring ended event during source transition (seek)');
+			return;
+		}
+
+		// A live stream has no end, so reaching one means the source starved.
+		if (liveRecovery) {
+			liveRecovery.recover('completed');
+			return;
+		}
+
+		await playback.reportStop(positionRef.current);
+
+		if (repeatMode === 'one') {
+			restartCurrent();
+			return;
+		}
+
+		isCleaningUpRef.current = true;
+		destroyHlsPlayer();
+		await cleanupVideoElement(videoRef.current);
+
+		const step = audioPlaylist && onPlayNext ? getNextStep() : null;
+		if (step?.type === 'play') {
+			onPlayNext(step.track);
+			return;
+		}
+		if (nextEpisode && onPlayNext && shouldAutoAdvance(settings.autoPlay, item)) {
+			onPlayNext(nextEpisode);
+		} else {
+			onEnded?.();
+		}
+	}, [onEnded, onPlayNext, nextEpisode, audioPlaylist, repeatMode, restartCurrent, getNextStep, settings.autoPlay, item, liveRecovery]);
+
+	const handleError = useCallback(async () => {
+		const startFailure = playbackStartTimedOutRef.current && !isPaused;
+		// A channel that fails to open reads as paused too, so only the viewer's own pause holds a live error back.
+		const paused = isPaused || (!isLiveTV && videoRef.current?.paused);
+		if (paused && !startFailure) {
+			console.log('[Player] Ignoring error while paused');
+			return;
+		}
+		playbackStartTimedOutRef.current = false;
+
+		// Ignore errors fired during cleanup (SDR reset video triggers error code 4)
+		if (isCleaningUpRef.current) {
+			console.log('[Player] Ignoring error during cleanup');
+			return;
+		}
+
+		if (sourceTransitionRef.current) {
+			console.log('[Player] Ignoring error during source transition (seek)');
+			return;
+		}
+
+		// A channel past its tune is the live recovery's to bring back.
+		if (liveRecovery?.engaged()) {
+			liveRecovery.recover('source-error');
+			return;
+		}
+
+		if (isHandlingErrorRef.current) {
+			console.log('[Player] Ignoring re-entrant error (cleanup in progress)');
+			return;
+		}
+		isHandlingErrorRef.current = true;
+
+		const video = videoRef.current;
+		let errorMessage = $L('Playback failed.');
+
+		try {
+		// A broken pre-roll skips to the feature rather than surfacing an error or
+		// spending the transcode fallback on it.
+		const skipTo = isPreroll(item) ? nextInQueue(videoQueue, item) : null;
+		if (skipTo && onPlayNext) {
+			isCleaningUpRef.current = true;
+			destroyHlsPlayer();
+			await cleanupVideoElement(videoRef.current);
+			onPlayNext(skipTo);
+			return;
+		}
+
+		if (video?.error) {
+			switch (video.error.code) {
+				case 1:
+					errorMessage = $L('Playback was aborted.');
+					break;
+				case 2:
+					errorMessage = $L('A network error occurred. Check your connection.');
+					break;
+				case 3:
+					errorMessage = $L('The video format is not supported by this TV.');
+					break;
+				case 4:
+					errorMessage = $L('The video source is not supported.');
+					break;
+				default:
+					errorMessage = $L('An unknown playback error occurred.');
+			}
+			console.error('[Player] Playback error:', video.error.code, video.error.message);
+			console.error('[Player] Error details:', {
+				code: video.error.code,
+				message: video.error.message,
+				currentSrc: video.currentSrc,
+				readyState: video.readyState,
+				networkState: video.networkState,
+				playMethod: playMethod
+			});
+		} else {
+			console.error('[Player] Playback error (no error object)');
+		}
+
+		const session = playback.getCurrentSession();
+		notePlaybackError(video?.error, session?.mediaSource, playMethod);
+		const hasVideoStream = !!session?.mediaSource?.MediaStreams?.some((s) => s.Type === 'Video');
+		const isAudioOnlySession = !!session?.mediaSource && !hasVideoStream;
+		if (isAudioOnlySession) {
+			errorMessage = $L('Audio playback failed for this track on this device.');
+			destroyHlsPlayer();
+			await cleanupVideoElement(videoRef.current);
+			setError(errorMessage);
+			return;
+		}
+
+		if (!hasTriedTranscode && playMethod !== playback.PlayMethod.Transcode) {
+			// Tier 1 → DirectPlay failed, try native HEVC transcode (Starfish)
+			console.log('[Player] DirectPlay failed, falling back to transcode...');
+			setHasTriedTranscode(true);
+
+			// the transcode url has its start time stripped and serves the full
+			// timeline, so keep the position and let the client seek after load
+			pendingResumeTicksRef.current = positionRef.current;
+
+			destroyHlsPlayer();
+			await cleanupVideoElement(videoRef.current);
+
+			try {
+				const result = await playback.getPlaybackInfo(item.Id, {
+					startPositionTicks: positionRef.current,
+					maxBitrate: selectedQuality || settings.maxBitrate,
+					enableDirectPlay: false,
+					enableDirectStream: false,
+					enableTranscoding: true,
+					mediaSourceId: mediaSourceId,
+					item: item,
+					stereoUpmixEnabled: settings.stereoUpmixEnabled
+				});
+
+				if (result.url) {
+					console.log('[Player] Switching to transcode on same element...');
+					setMediaUrl(result.url);
+					setPlayMethod(result.playMethod);
+					setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
+					setMimeType(result.mimeType || 'video/mp4');
+					playSessionRef.current = result.playSessionId;
+					// The server's stream is a fresh open and gets its own wait for a first frame.
+					liveRecovery?.tuned();
+					return;
+				}
+			} catch (fallbackErr) {
+				console.error('[Player] Transcode fallback failed:', fallbackErr);
+				errorMessage = $L('Transcoding failed. The server may not support this format.');
+			}
+		} else if (playMethod === 'Transcode' && (!forceHlsJsRef.current || transcodeRetryCountRef.current < 1) && Hls.isSupported()) {
+			// Tier 2: native HEVC transcode failed → switch to hls.js H.264+AAC
+			// Tier 3: hls.js H.264 retry (one attempt)
+			const isTier2 = !forceHlsJsRef.current;
+			if (!isTier2) transcodeRetryCountRef.current++;
+			console.log('[Player]', isTier2 ? 'Native transcode failed - switching to hls.js H.264' : 'hls.js H.264 failed, retrying...');
+
+			try {
+				await playback.reportStop(positionRef.current);
+				destroyHlsPlayer();
+				await cleanupVideoElement(videoRef.current);
+
+				const h264Profile = await getH264FallbackProfile();
+				const result = await playback.getPlaybackInfo(item.Id, {
+					startPositionTicks: positionRef.current,
+					maxBitrate: selectedQuality || settings.maxBitrate,
+					enableDirectPlay: false,
+					enableDirectStream: false,
+					enableTranscoding: true,
+					deviceProfile: h264Profile,
+					mediaSourceId: mediaSourceId,
+					item: item,
+					stereoUpmixEnabled: settings.stereoUpmixEnabled
+				});
+
+				if (result.url) {
+					if (isTier2) forceHlsJsRef.current = true;
+					console.log('[Player] H.264 fallback URL:', result.url.substring(0, 200));
+					setMediaUrl(result.url);
+					setPlayMethod(result.playMethod);
+					setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
+					setMimeType(result.mimeType || 'application/x-mpegURL');
+					playSessionRef.current = result.playSessionId;
+					return;
+				}
+			} catch (fallbackErr) {
+				console.error('[Player] H.264 fallback failed:', fallbackErr);
+				errorMessage = isTier2 ? $L('H.264 transcoding fallback failed.') : $L('Transcoding failed after retry. Try restarting the app.');
+			}
+		}
+
+		destroyHlsPlayer();
+		await cleanupVideoElement(videoRef.current);
+		setError(errorMessage);
+		} finally {
+			isHandlingErrorRef.current = false;
+		}
+	}, [hasTriedTranscode, playMethod, item, selectedQuality, settings.maxBitrate, settings.stereoUpmixEnabled, mediaSourceId, isPaused, isLiveTV, videoQueue, onPlayNext, liveRecovery]);
+
+	useEffect(() => {
+		handlersRef.current = {
+			onLoadedMetadata: handleLoadedMetadata,
+			onPlay: handlePlay,
+			onPause: handlePause,
+			onTimeUpdate: handleTimeUpdate,
+			onWaiting: handleWaiting,
+			onPlaying: handlePlaying,
+			onSeeked: handleSeeked,
+			onEnded: handleEnded,
+			onError: handleError,
+		};
+	}, [handleLoadedMetadata, handlePlay, handlePause, handleTimeUpdate, handleWaiting, handlePlaying, handleSeeked, handleEnded, handleError]);
+
+	const teardownPlayback = useCallback(async () => {
+		cancelNextEpisodeCountdown();
+		const currentPos = videoRef.current
+			? Math.floor(videoRef.current.currentTime * 10000000)
+			: positionRef.current;
+		await playback.reportStop(currentPos);
+
+		isCleaningUpRef.current = true;
+		destroyHlsPlayer();
+		await cleanupVideoElement(videoRef.current);
+	}, [cancelNextEpisodeCountdown]);
+
+	const handleBack = useCallback(async () => {
+		await teardownPlayback();
+		onBack?.();
+	}, [teardownPlayback, onBack]);
+
+	const handleOpenGuide = useCallback(async () => {
+		await teardownPlayback();
+		(onGuide || onBack)?.();
+	}, [teardownPlayback, onGuide, onBack]);
+
+	useEffect(() => {
+		handleBackRef.current = handleBack;
+	}, [handleBack]);
+
+	// Play during a held scrub is what commits it, landing on the scrubbed spot and playing on
+	// from there.
+	const resumeHeldScrub = useCallback(() => {
+		const held = scrubHoldRef.current;
+		if (!held.active) return false;
+		scrubHoldRef.current = {active: false, wasPlaying: false, ticks: null};
+		noteViewerActivity();
+		if (held.ticks != null) {
+			noteSeek();
+			seekToTicks(held.ticks);
+		}
+		setIsSeeking(false);
+		videoRef.current?.play()?.catch?.(() => {});
+		healthMonitorRef.current?.setPaused(false);
+		return true;
+	}, [noteViewerActivity, seekToTicks, noteSeek]);
+
+	// Moving off the bar lands a held scrub where it is and stays paused, and play then carries on
+	// from there.
+	const settleHeldScrub = useCallback(() => {
+		const held = scrubHoldRef.current;
+		if (!held.active || held.ticks == null) return;
+		noteSeek();
+		seekToTicks(held.ticks);
+		scrubHoldRef.current = {...held, ticks: null};
+	}, [seekToTicks, noteSeek]);
+
+	// A skip or a chapter jump lands somewhere the scrub knows nothing about, so a held scrub is
+	// dropped and playback carries on as it was.
+	const dropScrub = useCallback(() => {
+		const held = scrubHoldRef.current;
+		if (!held.active) return;
+		scrubHoldRef.current = {active: false, wasPlaying: false, ticks: null};
+		setIsSeeking(false);
+		if (held.wasPlaying) {
+			videoRef.current?.play()?.catch?.(() => {});
+			healthMonitorRef.current?.setPaused(false);
+		}
+	}, []);
+
+	// With a preview to look at, a scrub pauses playback so the preview holds still, and only play
+	// commits it. The viewer can turn that off, and without a preview playback carries on.
+	const beginScrub = useCallback(() => {
+		if (scrubHoldRef.current.active || settings.trickPlayPauseWhileScrubbing === false ||
+			settings.trickPlayMode === 'disabled' || isInGroup || !hasTrickplayPreview(item.Id, mediaSourceId)) return;
+		const video = videoRef.current;
+		const wasPlaying = Boolean(video && !video.paused);
+		scrubHoldRef.current = {active: true, wasPlaying, ticks: null};
+		if (wasPlaying) {
+			video.pause();
+			healthMonitorRef.current?.setPaused(true);
+		}
+	}, [settings.trickPlayPauseWhileScrubbing, settings.trickPlayMode, isInGroup, item.Id, mediaSourceId]);
+
+	// One scrub step on. A held scrub only moves its target, anything else seeks as it goes.
+	const scrubBy = useCallback((deltaSeconds) => {
+		if (!videoRef.current) return;
+		noteViewerActivity();
+		beginScrub();
+		setIsSeeking(true);
+		const held = scrubHoldRef.current;
+		clearTimeout(scrubSettleTimerRef.current);
+		if (!held.active) {
+			noteSeek();
+			seekByOffset(deltaSeconds, true);
+			// A scrub that doesn't hold playback has landed once the presses stop, and the preview
+			// goes with it.
+			scrubSettleTimerRef.current = setTimeout(() => setIsSeeking(false), 600);
+			return;
+		}
+		const base = held.ticks != null ? held.ticks : positionRef.current;
+		const maxTicks = Math.max(0, duration - 1) * 10000000;
+		const ticks = Math.max(0, Math.min(maxTicks, base + Math.floor(deltaSeconds * 10000000)));
+		scrubHoldRef.current = {...held, ticks};
+		setSeekPosition(ticks);
+	}, [noteViewerActivity, beginScrub, seekByOffset, duration, noteSeek]);
+
+	const handlePlayPause = useCallback(() => {
+		if (resumeHeldScrub()) {
+			showControls();
+			return;
+		}
+		noteViewerActivity();
+		if (videoRef.current) {
+			showControls();
+			if (isInGroup && !syncPlayCommandRef.current) {
+				if (isPaused) {
+					syncPlayService.sendPlayRequest();
+				} else {
+					syncPlayService.sendPauseRequest();
+				}
+				return;
+			}
+			if (isPaused) {
+				const rewind = settings.unpauseRewind || 0;
+				if (rewind > 0) {
+					const newTime = Math.max(0, videoRef.current.currentTime - rewind);
+					videoRef.current.currentTime = newTime;
+				}
+				videoRef.current.play();
+				healthMonitorRef.current?.setPaused(false);
+				liveRecovery?.setPaused(false);
+			} else {
+				videoRef.current.pause();
+				healthMonitorRef.current?.setPaused(true);
+				liveRecovery?.setPaused(true);
+			}
+		}
+	}, [isPaused, settings.unpauseRewind, isInGroup, showControls, noteViewerActivity, resumeHeldScrub, liveRecovery]);
+
+	const handleRewind = useCallback(() => {
+		if (!videoRef.current) return;
+		noteViewerActivity();
+		dropScrub();
+		noteSeek();
+		seekByOffset(-skipBackSeconds(settings));
+	}, [settings, seekByOffset, noteViewerActivity, dropScrub, noteSeek]);
+
+	const handleForward = useCallback(() => {
+		if (!videoRef.current) return;
+		noteViewerActivity();
+		dropScrub();
+		noteSeek();
+		seekByOffset(skipForwardSeconds(settings));
+	}, [settings, seekByOffset, noteViewerActivity, dropScrub, noteSeek]);
+
+	const playFromSystem = useCallback(() => { if (isPaused) handlePlayPause(); }, [isPaused, handlePlayPause]);
+	const pauseFromSystem = useCallback(() => { if (!isPaused) handlePlayPause(); }, [isPaused, handlePlayPause]);
+	useMediaSession({
+		title: item.Name,
+		artist: item.SeriesName || (item.ProductionYear ? String(item.ProductionYear) : ''),
+		artwork: isLiveTV ? null : getImageUrl(item._serverUrl || getServerUrl(), item.Id, 'Primary', {maxWidth: 512, quality: 80}),
+		paused: isPaused,
+		onPlay: playFromSystem,
+		onPause: pauseFromSystem,
+		onSeekForward: isLiveTV ? null : handleForward,
+		onSeekBackward: isLiveTV ? null : handleRewind,
+		onStop: handleBack
+	});
+
+	const openModal = useCallback((modal) => {
+	  lastFocusedElementRef.current = document.activeElement;
+		setActiveModal(modal);
+		window.requestAnimationFrame(() => {
+			const modalId = `${modal}-modal`;
+			const focusResult = Spotlight.focus(modalId);
+
+			if (!focusResult) {
+				const selectedItem = document.querySelector(`[data-modal="${modal}"] [data-selected="true"]`);
+				const firstItem = document.querySelector(`[data-modal="${modal}"] button`);
+				if (selectedItem) {
+					Spotlight.focus(selectedItem);
+				} else if (firstItem) {
+					Spotlight.focus(firstItem);
+				}
+			}
+		});
+	}, []);
+
+	const closeModal = useCallback(() => {
+		setActiveModal(null);
+		showControls(false);
+		window.requestAnimationFrame(() => {
+		  if (lastFocusedElementRef.current) {
+				Spotlight.focus(lastFocusedElementRef.current);
+			}else{
+			  Spotlight.focus('playerControls');
+			}
+		});
+	}, [showControls]);
+
+	const handleSelectSleep = useCallback((e) => {
+		const minutes = parseInt(e.currentTarget.dataset.minutes, 10);
+		startSleepTimer(minutes || null);
+		closeModal();
+	}, [startSleepTimer, closeModal]);
+
+	const handleSubtitleKeyDown = useCallback((e) => {
+		if (e.keyCode === 39) { // Right -> Appearance
+			e.preventDefault();
+			e.stopPropagation();
+			Spotlight.focus('btn-subtitle-appearance');
+		} else if (e.keyCode === 37) { // Left -> Offset
+			e.preventDefault();
+			e.stopPropagation();
+			Spotlight.focus('btn-subtitle-offset');
+		}
+	}, []);
+
+	const handleOpenSubtitleOffset = useCallback(() => {
+		openModal('subtitleOffset');
+	}, [openModal]);
+
+	const handleOpenSubtitleSettings = useCallback(() => {
+		openModal('subtitleSettings');
+	}, [openModal]);
+
+	// dvd and dvb bitmaps have no client renderer, the server burns them into
+	// the video, which needs a stream reload whenever one is picked or dropped
+	const reloadWithSubtitleIndex = useCallback(async (subIndex) => {
+		const currentPositionTicks = videoRef.current
+			? Math.floor(videoRef.current.currentTime * 10000000)
+			: positionRef.current || 0;
+		const result = await playback.changeSubtitleStream(subIndex);
+		if (result?.url) {
+			positionRef.current = currentPositionTicks;
+			if (currentPositionTicks > 0) {
+				pendingResumeTicksRef.current = currentPositionTicks;
+			}
+			setMediaUrl(result.url);
+			if (result.playMethod) setPlayMethod(result.playMethod);
+			setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
+			setMimeType(result.mimeType || 'video/mp4');
+		}
+	}, []);
+
+	const applySubtitleSelection = useCallback(async (index, streamList = subtitleStreams, shouldClose = true) => {
+		playback.updateCurrentSession({subtitleStreamIndex: index});
+
+		pgsInitGenRef.current++;
+		disposePgsRenderer(pgsRendererRef.current);
+		pgsRendererRef.current = null;
+		pgsInitRef.current = null;
+		assInitGenRef.current++;
+		disposeAssRenderer(assRendererRef.current);
+		assRendererRef.current = null;
+		clearAssCanvas(assCanvasRef.current);
+		showHostSubtitle(videoRef.current, -1);
+
+		if (index === -1) {
+			setSelectedSubtitleIndex(-1);
+			setSubtitleTrackEvents(null);
+			setCurrentSubtitleText(null);
+			if (burnInSubtitleRef.current != null) {
+				burnInSubtitleRef.current = null;
+				try {
+					await reloadWithSubtitleIndex(-1);
+				} catch (err) {
+					console.error('[Player] Subtitle reload failed:', err);
+				}
+			}
+		} else {
+			setSelectedSubtitleIndex(index);
+			const stream = streamList.find(s => s.index === index);
+
+			if (burnInSubtitleRef.current != null && !(stream && stream.isBurnIn)) {
+				burnInSubtitleRef.current = null;
+				try {
+					await reloadWithSubtitleIndex(index);
+				} catch (err) {
+					console.error('[Player] Subtitle reload failed:', err);
+				}
+			}
+
+			if (stream && stream.isBurnIn) {
+				setSubtitleTrackEvents(null);
+				setCurrentSubtitleText(null);
+				if (burnInSubtitleRef.current !== index) {
+					try {
+						await reloadWithSubtitleIndex(index);
+						burnInSubtitleRef.current = index;
+					} catch (err) {
+						console.error('[Player] Burn in subtitle reload failed:', err);
+					}
+				}
+			} else if (stream && stream.hostRendered) {
+				showHostSubtitle(videoRef.current, index);
+				setSubtitleTrackEvents(null);
+			} else if (stream && stream.isAss && supportsAssRenderer()) {
+				await initAssRendererForStream(stream);
+			} else if (stream && stream.isTextBased) {
+				loadTextTrack(stream);
+			} else if (stream && stream.isImageBased && settings.enablePgsRendering) {
+				await initPgsRendererForStream(stream);
+			} else {
+				setSubtitleTrackEvents(null);
+			}
+			setCurrentSubtitleText(null);
+		}
+
+		saveSubtitlePref(item, index, streamList || []);
+
+		if (shouldClose) {
+			closeModal();
+		}
+	}, [item, subtitleStreams, closeModal, settings.enablePgsRendering, initAssRendererForStream, initPgsRendererForStream, loadTextTrack, reloadWithSubtitleIndex]);
+
+	const handleOpenRemoteSubtitleSearch = useCallback(async () => {
+		if (!item?.Id) return;
+
+		setRemoteSubtitleResults([]);
+		setIsSearchingRemoteSubtitles(true);
+		setRemoteSubtitleError(null);
+		openModal('subtitleDownload');
+
+		const selectedSubtitle = subtitleStreams.find((s) => s.index === selectedSubtitleIndex);
+		const selectedAudio = audioStreams.find((s) => s.index === selectedAudioIndex);
+		const language = toSubtitleLanguage(
+			selectedSubtitle?.language,
+			selectedAudio?.language,
+			subtitleStreams[0]?.language,
+			audioStreams[0]?.language
+		);
+
+		try {
+			const results = await jellyfinApi.searchRemoteSubtitles(item.Id, language);
+			setRemoteSubtitleResults(mapRemoteSubtitleOptions(results));
+			window.requestAnimationFrame(() => {
+				const firstResult = document.querySelector('[data-modal="subtitleDownload"] button');
+				if (firstResult) Spotlight.focus(firstResult);
+			});
+		} catch (err) {
+			setRemoteSubtitleResults([]);
+			setRemoteSubtitleError(remoteSubtitleSearchError(err));
+		} finally {
+			setIsSearchingRemoteSubtitles(false);
+		}
+	}, [item, subtitleStreams, selectedSubtitleIndex, audioStreams, selectedAudioIndex, openModal]);
+
+	const handleSelectRemoteSubtitle = useCallback(async (e) => {
+		const index = parseInt(e.currentTarget.dataset.index, 10);
+		if (isNaN(index) || !remoteSubtitleResults[index] || !item?.Id) return;
+
+		setIsDownloadingRemoteSubtitle(true);
+		setRemoteSubtitleError(null);
+		try {
+			await jellyfinApi.downloadRemoteSubtitle(item.Id, remoteSubtitleResults[index].id);
+
+			const existingIndexes = new Set(subtitleStreams.map((s) => s.index));
+
+			// The server writes the file and then queues the metadata refresh that
+			// lists it, so the track only shows up a while after this call returns.
+			// The light item endpoint is what gets asked repeatedly, and the stream
+			// is negotiated once at the end.
+			const appeared = await pollForSubtitleAppearance(async () => {
+				const refreshed = await jellyfinApi.getItemMediaInfo(item.Id);
+				const source = refreshed?.MediaSources?.find((s) => s.Id === mediaSourceId) || refreshed?.MediaSources?.[0];
+				return (source?.MediaStreams || []).find((s) => s.Type === 'Subtitle' && !existingIndexes.has(s.Index)) || null;
+			});
+
+			if (!appeared) {
+				setRemoteSubtitleError(remoteSubtitleNotAppearedMessage());
+				return;
+			}
+
+			const startTicks = Math.floor((videoRef.current?.currentTime || 0) * 10000000);
+			const info = await jellyfinApi.getPlaybackInfo(item.Id, {
+				StartTimeTicks: startTicks,
+				MediaSourceId: mediaSourceId,
+				AudioStreamIndex: selectedAudioIndex,
+				SubtitleStreamIndex: selectedSubtitleIndex,
+				MaxStreamingBitrate: selectedQuality || settings.maxBitrate
+			});
+
+			const mediaSource = info?.MediaSources?.find((source) => source.Id === mediaSourceId) || info?.MediaSources?.[0];
+			const refreshedSubtitleStreams = mapSubtitleStreamsFromMediaSource(mediaSource, getServerUrl());
+			setSubtitleStreams(refreshedSubtitleStreams);
+			await applySubtitleSelection(appeared.Index, refreshedSubtitleStreams, true);
+		} catch (err) {
+			setRemoteSubtitleError(remoteSubtitleDownloadError(err));
+		} finally {
+			setIsDownloadingRemoteSubtitle(false);
+		}
+	}, [remoteSubtitleResults, item, subtitleStreams, mediaSourceId, selectedAudioIndex, selectedSubtitleIndex, selectedQuality, settings.maxBitrate, applySubtitleSelection]);
+
+	const applyAudioSelection = useCallback(async (index, shouldClose = true) => {
+		setSelectedAudioIndex(index);
+		// Saved here rather than after the switch, because switching leaves by several
+		// routes and the choice was made either way.
+		saveAudioPref(item, index, audioStreams || []);
+		if (shouldClose) closeModal();
+
+		setHasTriedTranscode(false);
+		forceHlsJsRef.current = false;
+		transcodeRetryCountRef.current = 0;
+
+		try {
+			if (playMethod !== playback.PlayMethod.Transcode && videoRef.current?.audioTracks?.length > 1) {
+				const audioTrackList = videoRef.current.audioTracks;
+				const matchIndex = matchAudioTrack(audioTrackList, audioStreams, index);
+
+				if (matchIndex >= 0) {
+					for (let i = 0; i < audioTrackList.length; i++) {
+						audioTrackList[i].enabled = (i === matchIndex);
+					}
+					playback.updateCurrentSession({audioStreamIndex: index});
+					console.log('[Player] Switched audio natively via audioTracks API, matchIndex:', matchIndex);
+					return;
+				}
+			}
+
+			const currentPositionTicks = videoRef.current
+				? Math.floor(videoRef.current.currentTime * 10000000)
+				: positionRef.current || 0;
+
+			const result = await playback.changeAudioStream(index, currentPositionTicks);
+			if (result) {
+				positionRef.current = currentPositionTicks;
+
+				// Preserve playback position when reloading for audio switch
+				if (currentPositionTicks > 0) {
+					pendingResumeTicksRef.current = currentPositionTicks;
+				}
+
+
+				let newUrl = result.url;
+				if (result.playMethod === playback.PlayMethod.DirectPlay) {
+					const separator = newUrl.includes('?') ? '&' : '?';
+					newUrl = `${newUrl}${separator}_audioSwitch=${Date.now()}`;
+					// Try native audio track switch after reload as safety net
+					pendingAudioRef.current = {
+						streamIndex: index,
+						audioStreams: result.audioStreams || audioStreams
+					};
+				}
+				setMediaUrl(newUrl);
+				if (result.playMethod) setPlayMethod(result.playMethod);
+				setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
+				setMimeType(result.mimeType || 'video/mp4');
+				if (result.audioStreams) setAudioStreams(result.audioStreams);
+				if (result.subtitleStreams) setSubtitleStreams(result.subtitleStreams);
+			}
+		} catch (err) {
+			console.error('[Player] Failed to change audio:', err);
+		}
+	}, [item, playMethod, closeModal, audioStreams]);
+
+	// Track selection - using data attributes to avoid arrow functions in JSX
+	const handleSelectAudio = useCallback((e) => {
+		const index = parseInt(e.currentTarget.dataset.index, 10);
+		if (!isNaN(index)) applyAudioSelection(index);
+	}, [applyAudioSelection]);
+
+	const handleSelectSubtitle = useCallback(async (e) => {
+		const index = parseInt(e.currentTarget.dataset.index, 10);
+		if (isNaN(index)) return;
+		await applySubtitleSelection(index, subtitleStreams, true);
+	}, [applySubtitleSelection, subtitleStreams]);
+
+	// What another client's remote reaches while this plays. It goes through the same handlers as
+	// the buttons, so a group, a scrub or the next episode behaves as it would for the viewer.
+	useRemotePlayerControls({
+		pause: () => {
+			if (!isPaused) handlePlayPause();
+		},
+		resume: () => {
+			if (isPaused) handlePlayPause();
+		},
+		playPause: handlePlayPause,
+		stop: handleBack,
+		// Swaps in place the way Next Up does. The full teardown behind Back makes the next
+		// load sit out the webOS decoder release wait, about three seconds.
+		release: async () => {
+			cancelNextEpisodeCountdown();
+			await playback.reportStop(videoRef.current ? Math.floor(videoRef.current.currentTime * 10000000) : positionRef.current);
+		},
+		seek: (ticks) => {
+			dropScrub();
+			if (!groupSeekTo(ticks)) seekToTicks(ticks);
+		},
+		next: () => (isAudioMode ? handleNextTrack() : handlePlayNextNow()),
+		previous: handlePrevTrack,
+		rewind: handleRewind,
+		fastForward: handleForward,
+		setAudioStream: (index) => {
+			if ((audioStreams || []).some((s) => s.index === index)) applyAudioSelection(index, false);
+		},
+		setSubtitleStream: (index) => {
+			if (index === -1 || subtitleStreams.some((s) => s.index === index)) applySubtitleSelection(index, subtitleStreams, false);
+		},
+		setRepeatMode,
+		setShuffle: setShuffleMode
+	});
+
+	const handleSelectQuality = useCallback((e) => {
+		const valueStr = e.currentTarget.dataset.value;
+		const value = valueStr === 'null' ? null : parseInt(valueStr, 10);
+		setSelectedQuality(isNaN(value) ? null : value);
+		closeModal();
+	}, [closeModal]);
+
+	const handleSelectChapter = useCallback((e) => {
+		const ticks = parseInt(e.currentTarget.dataset.ticks, 10);
+		if (isNaN(ticks) || ticks < 0) return;
+		dropScrub();
+		if (!groupSeekTo(ticks)) seekToTicks(ticks);
+		closeModal();
+	}, [closeModal, seekToTicks, groupSeekTo, dropScrub]);
+
+	const handleProgressClick = useCallback((e) => {
+		if (!videoRef.current) return;
+		const rect = e.currentTarget.getBoundingClientRect();
+		const percent = (e.clientX - rect.left) / rect.width;
+		const newTime = percent * duration;
+		const newTicks = Math.floor(newTime * 10000000);
+		if (newTicks && !groupSeekTo(newTicks)) seekToTicks(newTicks);
+	}, [duration, seekToTicks, groupSeekTo]);
+
+	const handleProgressKeyDown = useCallback((e) => {
+		if (!videoRef.current) return;
+		const step = settings.seekStep;
+		showControls();
+
+		if (e.key === 'ArrowLeft' || e.keyCode === 37) {
+			e.preventDefault();
+			scrubBy(-step);
+		} else if (e.key === 'ArrowRight' || e.keyCode === 39) {
+			e.preventDefault();
+			scrubBy(step);
+		} else if (e.key === 'Enter' || e.keyCode === 13) {
+			e.preventDefault();
+			if (resumeHeldScrub()) return;
+			setIsSeeking(false);
+			handlePlayPause();
+		} else if (e.key === 'ArrowUp' || e.keyCode === 38) {
+			e.preventDefault();
+			settleHeldScrub();
+			const next = isAudioMode ? nextAudioFocusRow('progress', 'up') : 'bottom';
+			setFocusRow(next);
+			setIsSeeking(false);
+			window.requestAnimationFrame(() => Spotlight.focus(isAudioMode ? AUDIO_FOCUS_IDS[next] : 'play-pause-btn'));
+		} else if (e.key === 'ArrowDown' || e.keyCode === 40) {
+			e.preventDefault();
+			settleHeldScrub();
+			setFocusRow('bottom');
+			setIsSeeking(false);
+			if (isAudioMode) {
+				window.requestAnimationFrame(() => Spotlight.focus('play-pause-btn'));
+			}
+		}
+	}, [settings.seekStep, scrubBy, resumeHeldScrub, settleHeldScrub, showControls, handlePlayPause, isAudioMode]);
+
+	const handleProgressBlur = useCallback(() => {
+		settleHeldScrub();
+		setIsSeeking(false);
+	}, [settleHeldScrub]);
+
+	const handleToggleFavorite = useCallback(async () => {
+		if (!item?.Id) return;
+		const newState = !isFavorite;
+		setIsFavorite(newState);
+		try {
+			const serverUrl = item._serverUrl || getServerUrl();
+			const serverApi = serverUrl ? createApiForServer(serverUrl) : jellyfinApi;
+			await serverApi.setFavorite(item.Id, newState);
+		} catch (err) {
+			console.error('[Player] Failed to toggle favorite:', err);
+			setIsFavorite(!newState);
+		}
+	}, [item, isFavorite]);
+
+	const handleToggleZoom = useCallback(() => {
+		setZoomMode((prev) => {
+			const next = prev === 'fit' ? 'fill' : (prev === 'fill' ? 'stretch' : 'fit');
+			updateSetting('playerZoomMode', zoomSettingFromInternal(next));
+			return next;
+		});
+	}, [updateSetting]);
+
+	const handleOpenCast = useCallback(async () => {
+		openModal('cast');
+		if (castMembers.length > 0 || !(item?.Type === 'Episode' && item?.SeriesId)) return;
+
+		setIsLoadingCastMembers(true);
+		try {
+			const apiClient = item._serverUrl
+				? createApiForServer(item._serverUrl, item._serverAccessToken, item._serverUserId)
+				: jellyfinApi;
+			const seriesItem = await apiClient.getItem(item.SeriesId);
+			setCastMembers(Array.isArray(seriesItem?.People) ? seriesItem.People : []);
+		} catch (err) {
+			setCastMembers([]);
+		} finally {
+			setIsLoadingCastMembers(false);
+		}
+	}, [openModal, castMembers.length, item]);
+
+	const handleSelectCastMember = useCallback((person) => {
+		if (!person?.Id || !onSelectPerson) return;
+		closeModal();
+		onSelectPerson({
+			...person,
+			Type: 'Person',
+			_serverUrl: item?._serverUrl,
+			_serverType: item?._serverType,
+			_serverAccessToken: item?._serverAccessToken,
+			_serverUserId: item?._serverUserId
+		});
+	}, [closeModal, item, onSelectPerson]);
+
+	const handleButtonAction = useCallback((action) => {
+		showControls();
+		switch (action) {
+			case 'playPause': handlePlayPause(); break;
+			case 'rewind': handleRewind(); break;
+			case 'forward': handleForward(); break;
+			case 'audio': openModal('audio'); break;
+			case 'subtitle': openModal('subtitle'); break;
+			case 'quality': openModal('quality'); break;
+			case 'chapter': openModal('chapter'); break;
+			case 'cast': handleOpenCast(); break;
+			case 'zoom': handleToggleZoom(); break;
+			case 'sleep': openModal('sleep'); break;
+			case 'info': openModal('info'); break;
+			case 'channels': openCarousel(); break;
+			case 'guide': handleOpenGuide(); break;
+			case 'next': handlePlayNextNow(); break;
+			case 'nextTrack': handleNextTrack(); break;
+			case 'prevTrack': handlePrevTrack(); break;
+			case 'shuffle': handleToggleShuffle(); break;
+			case 'repeat': handleToggleRepeat(); break;
+			case 'favorite': handleToggleFavorite(); break;
+			default: break;
+		}
+	}, [showControls, handlePlayPause, handleRewind, handleForward, openModal, handleOpenCast, handleToggleZoom, handleOpenGuide, openCarousel, handlePlayNextNow, handleNextTrack, handlePrevTrack, handleToggleShuffle, handleToggleRepeat, handleToggleFavorite]);
+
+	const handleControlButtonClick = useCallback((e) => {
+		const action = e.currentTarget.dataset.action;
+		if (action) {
+			handleButtonAction(action);
+		}
+	}, [handleButtonAction]);
+
+	const handleSubtitleOffsetChange = useCallback((newOffset) => {
+		subtitleOffsetRef.current = newOffset;
+		setSubtitleOffset(newOffset);
+		if (pgsRendererRef.current) pgsRendererRef.current.timeOffset = -newOffset;
+	}, []);
+
+	const stopPropagation = useCallback((e) => {
+		e.stopPropagation();
+	}, []);
+
+	const executeSyncPlayCommand = useCallback((command, delay) => {
+		const video = videoRef.current;
+		if (!video) return;
+		const {Command, PositionTicks, When} = command;
+		syncLog('[Player] SyncPlay command', Command, 'at', PositionTicks != null ? PositionTicks / 10000000 : null, 's, delay', delay, 'ms, set at', positionRef.current / 10000000, 's', video.paused ? 'paused' : 'playing');
+		cancelGroupSeek();
+		cancelSyncWait();
+		skipGovernorRef.current.cancel();
+		syncPlayCommandRef.current = true;
+		suppressBufferingUntilRef.current = Date.now() + syncPlayService.BUFFERING_SUPPRESS_MS;
+
+		switch (Command) {
+			case 'Unpause': {
+				groupHoldRef.current = false;
+				// The group is playing again, so a seek still landing must
+				// not pause the set when it does.
+				if (groupSeekPendingRef.current) groupSeekPendingRef.current.pauseOnLand = false;
+				// The sync point is the position at the command's own time,
+				// which for a late arrival or an echo is not now.
+				syncPlayService.setSyncReference(PositionTicks != null ? PositionTicks : positionRef.current, syncPlayService.whenToServerMs(When));
+				let startTarget = null;
+				if (delay > 0) {
+					// On time: a seek costs a rebuffer the whole group then
+					// waits on, so a difference this small is left alone.
+					if (PositionTicks != null && needsSeek(positionRef.current, PositionTicks)) startTarget = PositionTicks;
+				} else if (video.paused) {
+					// Late: start where the group has got to by now.
+					const target = syncPlayService.getAdjustedPosition(PositionTicks, When);
+					if (target != null && needsSeek(positionRef.current, target)) startTarget = target;
+				}
+				if (startTarget != null) startGroupSeek(startTarget, false);
+				// Already playing: the server answers any Ready it gets while
+				// playing with the last sync point unchanged. That confirms
+				// where the group is; seeking on it restarts the stream for
+				// nothing, and the drift check corrects a real gap.
+				video.play()?.catch?.(() => {});
+				// The set takes a second or two to actually move, and a drift
+				// read before it does is not one a skip could close.
+				skipGovernorRef.current.onStart({
+					nowMs: Date.now(),
+					fromMs: positionRef.current / 10000,
+					targetMs: (startTarget != null ? startTarget : positionRef.current) / 10000
+				});
+				break;
+			}
+			case 'Pause': {
+				groupHoldRef.current = false;
+				video.pause();
+				syncPlayService.clearSyncReference();
+				if (PositionTicks != null && needsSeek(positionRef.current, PositionTicks)) startGroupSeek(PositionTicks, true);
+				else showFrameIfNone();
+				break;
+			}
+			case 'Seek': {
+				// The server holds everyone until they report Ready at the
+				// new position, then unpauses them together, so the set
+				// waits there paused rather than running on ahead.
+				if (PositionTicks != null) {
+					startGroupSeek(PositionTicks, true, true);
+					syncPlayService.setSyncReference(PositionTicks);
+				}
+				break;
+			}
+			default:
+				break;
+		}
+
+		syncPlayCommandRef.current = false;
+	}, [cancelGroupSeek, cancelSyncWait, startGroupSeek, showFrameIfNone]);
+
+	useSyncPlayCommands({
+		lastCommand,
+		isReady: () => !!videoRef.current,
+		execute: executeSyncPlayCommand,
+		onStop: handleBack
+	});
+
+	// Commands alone cant hold this in step, because the decoder loses a little
+	// wall clock time on every rebuffer and nothing measured it afterwards.
+	useEffect(() => {
+		const correction = correctionOptions(settings);
+		if (!isInGroup || isPaused || !correction.enabled) return undefined;
+
+		let lastHeldDrift = 0;
+		const interval = setInterval(() => {
+			const video = videoRef.current;
+			if (!video || syncPlayCommandRef.current || groupSeekPendingRef.current) return;
+			const expected = syncPlayService.getExpectedPositionTicks(correction.extraOffsetMs);
+			const drift = driftMs(positionRef.current, expected);
+			const nowMs = Date.now();
+			const positionMs = positionRef.current / 10000;
+			const verdict = skipGovernorRef.current.evaluate({
+				nowMs,
+				positionMs,
+				driftMs: drift,
+				isPlaying: !video.paused,
+				isBuffering: video.seeking || stalledRef.current
+			});
+			if (verdict === 'defer') return;
+			const action = chooseCorrection(drift, verdict, correction, skipGovernorRef.current.seekAllowanceMs());
+
+			if (action.type === 'skip') {
+				const targetTicks = expected + action.aheadMs * 10000;
+				skipGovernorRef.current.onSkip({nowMs, fromMs: positionMs, targetMs: targetTicks / 10000, driftMs: drift});
+				syncLog('[Player] SyncPlay drift', drift, 'ms, skipping to', targetTicks / 10000000, 's, aimed', action.aheadMs, 'ms ahead (skip', skipGovernorRef.current.skipsUsed(), ')');
+				suppressBufferingUntilRef.current = Date.now() + syncPlayService.BUFFERING_SUPPRESS_MS;
+				seekToTicks(targetTicks);
+			} else if (action.type === 'wait') {
+				syncLog('[Player] SyncPlay drift', drift, 'ms, waiting', action.ms, 'ms for the group');
+				cancelSyncWait();
+				video.pause();
+				syncWaitTimerRef.current = setTimeout(() => {
+					syncWaitTimerRef.current = null;
+					videoRef.current?.play()?.catch?.(() => {});
+				}, action.ms);
+			} else if (drift != null && Math.abs(drift - lastHeldDrift) > 250) {
+				// A steady gap is logged once, not every two seconds.
+				lastHeldDrift = drift;
+				syncLog('[Player] SyncPlay drift', drift, 'ms, held');
+			}
+		}, DRIFT_CHECK_MS);
+
+		return () => clearInterval(interval);
+	}, [isInGroup, isPaused, seekToTicks, settings, cancelSyncWait]);
+
+	// The server marks every member as buffering after a group seek or a change
+	// of item and waits for each one to report Ready, so a set that never
+	// stalled still has to answer.
+	useEffect(() => {
+		if (!isInGroup) return;
+
+		const listener = syncPlayService.addListener((event) => {
+			if (event === 'stateUpdate') readyGate.request();
+		});
+
+		return () => {
+			listener();
+			readyGate.cancel();
+		};
+	}, [isInGroup, readyGate]);
+
+	useEffect(() => {
+		if (!isInGroup || !videoRef.current) return;
+
+		// A stall is reported once it has lasted, and only while the position
+		// is really not moving; the group stops for every report.
+		const reportIfStillStalled = (delayMs) => {
+			clearTimeout(stallRecheckTimerRef.current);
+			const v = videoRef.current;
+			const before = v ? v.currentTime : null;
+			stallRecheckTimerRef.current = setTimeout(() => {
+				const now = videoRef.current;
+				if (!now || now.paused || !stalledRef.current) return;
+				if (before != null && now.currentTime !== before) return;
+				syncPlayService.sendBufferingRequest(syncPlaySample);
+			}, delayMs);
+		};
+
+		const reportBuffering = () => {
+			const remaining = suppressBufferingUntilRef.current - Date.now();
+			// A 'waiting' inside the window came from our own seek. A genuine
+			// stall must still reach the server eventually, so re-check once
+			// the window expires ('waiting' won't fire again for it).
+			reportIfStillStalled(remaining > 0 ? remaining + 100 : STALL_DEBOUNCE_MS);
+		};
+
+		const reportReady = () => {
+			clearTimeout(stallRecheckTimerRef.current);
+			readyGate.request();
+		};
+
+		const video = videoRef.current;
+		video.addEventListener('waiting', reportBuffering);
+		video.addEventListener('playing', reportReady);
+		video.addEventListener('canplay', reportReady);
+
+		return () => {
+			clearTimeout(stallRecheckTimerRef.current);
+			readyGate.cancel();
+			video.removeEventListener('waiting', reportBuffering);
+			video.removeEventListener('playing', reportReady);
+			video.removeEventListener('canplay', reportReady);
+		};
+	}, [isInGroup, readyGate, syncPlaySample]);
+
+	useEffect(() => {
+		const handleKeyDown = (e) => {
+			const key = e.key || e.keyCode;
+			// The channel carousel takes every key while it's up.
+			if (carouselOpenRef.current) return;
+
+			if (handlePopupKeyDown(e)) return;
+
+			if (e.keyCode === KEYS.PLAY) {
+				e.preventDefault();
+				e.stopPropagation();
+				showControls();
+				if (resumeHeldScrub()) return;
+				if (isPaused) handlePlayPause();
+				return;
+			}
+			if (e.keyCode === KEYS.PAUSE) {
+				e.preventDefault();
+				e.stopPropagation();
+				showControls();
+				if (!isPaused) handlePlayPause();
+				return;
+			}
+			if (e.keyCode === KEYS.PLAY_PAUSE) {
+				e.preventDefault();
+				e.stopPropagation();
+				showControls();
+				if (resumeHeldScrub()) return;
+				handlePlayPause();
+				return;
+			}
+			if (e.keyCode === KEYS.FAST_FORWARD) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (!isLiveTV) handleForward();
+				showControls();
+				return;
+			}
+			if (e.keyCode === KEYS.REWIND) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (!isLiveTV) handleRewind();
+				showControls();
+				return;
+			}
+			if (e.keyCode === KEYS.STOP) {
+				e.preventDefault();
+				e.stopPropagation();
+				handleBack();
+				return;
+			}
+
+			// Up during live playback opens the channel carousel, over the OSD or not.
+			if (isLiveTV && !activeModal && (key === 'ArrowUp' || e.keyCode === 38)) {
+				e.preventDefault();
+				e.stopPropagation();
+				openCarousel();
+				return;
+			}
+
+			if (isBackKey(e)) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (activeModal) {
+					closeModal();
+					return;
+				}
+				// Back leaves the queue or lyrics panel before it leaves the player
+				if (isAudioMode && focusRow === 'panel') {
+					exitAudioPanel(setFocusRow);
+					return;
+				}
+				if (controlsVisible) {
+					hideControls();
+					return;
+				}
+				handleBack();
+				return;
+			}
+
+			// The rest of the remote belongs to a failed channel's Retry.
+			if (error && isLiveTV) return;
+
+			// Left/Right when controls hidden -> show controls and focus on seekbar
+			if (!controlsVisible && !activeModal) {
+				if ((key === 'Enter' || e.keyCode === 13) && (skipSegment || showSkipCredits || showNextEpisode)) {
+					return;
+				}
+				if (key === 'Enter' || e.keyCode === 13) {
+					e.preventDefault();
+					// Hidden controls keep focus, so the focused one would get this key
+					// too and toggle playback straight back.
+					e.stopPropagation();
+					handlePlayPause();
+					return;
+				}
+				if ((key === 'ArrowLeft' || e.keyCode === 37 || key === 'ArrowRight' || e.keyCode === 39 ) && (showSkipCredits || showNextEpisode)) {
+					return;
+				}
+				if (key === 'ArrowLeft' || e.keyCode === 37 || key === 'ArrowRight' || e.keyCode === 39) {
+					e.preventDefault();
+					// Same as Enter, or the focused progress bar adds a second step.
+					e.stopPropagation();
+					if (isLiveTV) { showControls(); return; }
+					showControls();
+					setFocusRow('progress');
+					scrubBy(key === 'ArrowLeft' || e.keyCode === 37 ? -settings.seekStep : settings.seekStep);
+					return;
+				}
+				e.preventDefault();
+				showControls();
+				return;
+			}
+
+			if (isAudioMode && controlsVisible && !activeModal &&
+				handleAudioFocusKey(e, {focusRow, setFocusRow, showControls})) {
+				return;
+			}
+
+			// Up/Down arrow navigation between rows when controls are visible
+			if (controlsVisible && !activeModal) {
+				// Any key restarts the hide timer, or they hide while someone moves along the
+				// buttons and the next Left or Right seeks.
+				showControls();
+
+				if (key === 'ArrowUp' || e.keyCode === 38) {
+					e.preventDefault();
+					setFocusRow(prev => {
+						if (prev === 'bottom') return !isLiveTV ? 'progress' : 'bottom';
+						if (prev === 'progress') {
+							window.requestAnimationFrame(() => Spotlight.focus('play-pause-btn'));
+							return 'bottom';
+						}
+						return 'bottom';
+					});
+					return;
+				}
+				if (key === 'ArrowDown' || e.keyCode === 40) {
+					e.preventDefault();
+					setFocusRow(prev => {
+						if (prev === 'top') return isLiveTV ? (bottomButtons.length > 0 ? 'bottom' : 'top') : 'progress';
+						if (prev === 'progress') {
+							return bottomButtons.length > 0 ? 'bottom' : 'progress';
+						}
+						return 'bottom';
+					});
+					return;
+				}
+			}
+
+		};
+
+		keyDownRef.current = handleKeyDown;
+	});
+
+	useEffect(() => {
+		const onKeyDown = (e) => keyDownRef.current?.(e);
+		window.addEventListener('keydown', onKeyDown, true);
+		return () => window.removeEventListener('keydown', onKeyDown, true);
+	}, []);
+
+	const displayTime = isSeeking ? (seekPosition / 10000000) : currentTime;
+	const progressPercent = duration > 0 ? (displayTime / duration) * 100 : 0;
+	const bufferedPercent = useMemo(() => {
+		if (duration <= 0) return progressPercent;
+		const video = videoRef.current;
+		if (!video || !video.buffered || video.buffered.length === 0) return progressPercent;
+
+		let bufferedEnd = displayTime;
+		try {
+			for (let i = 0; i < video.buffered.length; i += 1) {
+				const start = video.buffered.start(i);
+				const end = video.buffered.end(i);
+				bufferedEnd = Math.max(bufferedEnd, end);
+				if (displayTime >= start && displayTime <= end + 0.1) {
+					break;
+				}
+			}
+		} catch {
+			return progressPercent;
+		}
+
+		const percent = (bufferedEnd / duration) * 100;
+		return Math.max(progressPercent, Math.min(100, percent));
+	}, [displayTime, duration, progressPercent]);
+
+	useEffect(() => {
+		if (!controlsVisible) return;
+
+		window.requestAnimationFrame(() => {
+			if (focusRow === 'progress') {
+				Spotlight.focus('progress-bar');
+			} else if (focusRow === 'bottom') {
+				Spotlight.focus('play-pause-btn');
+			}
+		});
+	}, [focusRow, controlsVisible]);
+
+	return (
+		<div className={css.container} onClick={!isLoading && !error ? showControls : undefined}>
+			<div
+				ref={containerRef}
+				className={css.videoPlayer}
+				style={isLoading || isAudioMode ? {opacity: 0, pointerEvents: 'none'} : undefined}
+			/>
+
+			<canvas ref={assCanvasRef} className={css.assCanvas} />
+
+			{isLoading && <LoadingAnimationLayer dimmed label={$L('Loading Stream...')} />}
+
+			{error && !isLiveTV && (
+				<div className={css.error}>
+					<h2>{$L('Playback Error')}</h2>
+					<p>{error}</p>
+					<Button onClick={onBack}>{$L('Go Back')}</Button>
+				</div>
+			)}
+
+			{error && isLiveTV && !carouselProps && <LiveFailedCard channelName={item.Name} onRetry={handleRetryChannel} />}
+
+			{!isLoading && !error && isAudioMode && (
+				<AudioMode
+					item={item}
+					title={title}
+					subtitle={subtitle}
+					serverUrl={getServerUrl()}
+					isFavorite={isFavorite}
+					onToggleFavorite={handleToggleFavorite}
+					focusRow={focusRow}
+					activeTab={audioTab}
+					onSelectTab={setAudioTab}
+					onEnterPanel={handleEnterAudioPanel}
+					audioPlaylist={audioPlaylist}
+					onSelectTrack={handleSelectQueueTrack}
+					lyrics={lyrics}
+					onSeekToLine={handleSeekToLyric}
+				/>
+			)}
+
+			{/* Custom Subtitle Overlay - webOS doesn't support native <track> elements */}
+			{!isLoading && !error && currentSubtitleText && !isAudioMode && (
+				<div
+					className={css.subtitleOverlay}
+					style={getSubtitleOverlayStyle(subtitleStyleSettings)}
+				>
+					<div
+						className={css.subtitleText}
+						style={getSubtitleTextStyle(subtitleStyleSettings)}
+						// eslint-disable-next-line react/no-danger
+						dangerouslySetInnerHTML={{__html: sanitizeSubtitleHtml(currentSubtitleText)}}
+					/>
+				</div>
+			)}
+
+
+			{!isLoading && (reconnecting || showBuffering) && <LoadingAnimationLayer label={reconnecting || $L('Loading Stream...')} />}
+
+			{!isLoading && !error && isPaused && settings.showDescriptionOnPause && item?.Overview && !isAudioMode && !activeModal && !controlsVisible && (
+				<div className={css.pauseDescriptionOverlay}>
+					<div className={css.pauseDescriptionText}>{item.Overview}</div>
+				</div>
+			)}
+
+			{askStillWatching && (
+				<StillWatchingDialog onContinue={handleStillWatchingContinue} onStop={handleStillWatchingStop} />
+			)}
+
+			{!isLoading && !error && (showSkipCredits || showNextEpisode) && nextEpisode && !isAudioMode && !activeModal && !controlsVisible && (
+				<NextEpisodeContainer spotlightRestrict="self-only">
+					<NextUpOverlay
+						episode={nextEpisode}
+						imageUrl={getImageUrl(item._serverUrl || getServerUrl(), nextEpisode.Id, 'Primary', {maxWidth: 400, quality: 80})}
+						serverUrl={item._serverUrl || getServerUrl()}
+						countdown={nextEpisodeCountdown}
+						timeout={settings.nextUpTimeout ?? 7}
+						countdownStyle={settings.nextUpCountdownStyle ?? 'both'}
+						minimal={settings.nextUpBehavior === 'minimal'}
+						onPlay={handlePlayNextNow}
+						onDismiss={cancelNextEpisodeCountdown}
+					/>
+				</NextEpisodeContainer>
+			)}
+
+			{!isLoading && !error && skipSegment && !isAudioMode && !isLiveTV && !activeModal && !controlsVisible && (
+				<SkipSegmentOverlay
+					type={skipSegment.type}
+					remainingSeconds={skipSegment.remainingSeconds}
+					progress={skipSegment.progress}
+					countdownStyle={settings.nextUpCountdownStyle ?? 'both'}
+					onSkip={handleSkipSegment}
+					spotlightId="skip-segment-btn"
+				/>
+			)}
+
+			{carouselProps && (
+				<ChannelCarousel
+					{...carouselProps}
+					serverUrl={getServerUrl()}
+					clockDisplay={settings.clockDisplay}
+				/>
+			)}
+
+			{!isLoading && !error && <PlayerControls
+				isHdrContent={isHdrContent}
+				css={css}
+				controlsVisible={controlsVisible}
+				activeModal={activeModal}
+				isAudioMode={isAudioMode}
+				isLiveTV={isLiveTV}
+				liveProgram={liveProgram}
+				focusRow={focusRow}
+				title={title}
+				subtitle={subtitle}
+				logoUrl={logoUrl}
+				topButtons={topButtons}
+				bottomButtons={bottomButtons}
+				displayTime={displayTime}
+				duration={duration}
+				progressPercent={progressPercent}
+				bufferedPercent={bufferedPercent}
+				isSeeking={isSeeking}
+				item={item}
+				mediaSourceId={mediaSourceId}
+				playMethod={playMethod}
+				selectedAudioIndex={selectedAudioIndex}
+				selectedSubtitleIndex={selectedSubtitleIndex}
+				selectedQuality={selectedQuality}
+				audioStreams={audioStreams}
+				subtitleStreams={subtitleStreams}
+				chapters={chapters}
+				currentTime={currentTime}
+				subtitleOffset={subtitleOffset}
+				subtitleTrackEvents={subtitleTrackEvents}
+				handleControlButtonClick={handleControlButtonClick}
+				handleProgressClick={handleProgressClick}
+				handleProgressKeyDown={handleProgressKeyDown}
+				handleProgressBlur={handleProgressBlur}
+				handleSelectAudio={handleSelectAudio}
+				handleSelectSubtitle={handleSelectSubtitle}
+				handleSubtitleKeyDown={handleSubtitleKeyDown}
+				handleSelectSleep={handleSelectSleep}
+				sleepMinutes={sleepMinutes}
+				sleepRemainingSeconds={sleepRemainingSeconds}
+				handleSelectQuality={handleSelectQuality}
+				handleSelectChapter={handleSelectChapter}
+				handleSelectCastMember={handleSelectCastMember}
+				handleOpenSubtitleOffset={handleOpenSubtitleOffset}
+				handleOpenSubtitleSettings={handleOpenSubtitleSettings}
+				handleOpenRemoteSubtitleSearch={handleOpenRemoteSubtitleSearch}
+				handleSelectRemoteSubtitle={handleSelectRemoteSubtitle}
+				canDownloadRemoteSubtitles={!isAudioMode && Boolean(item?.Id)}
+				isSearchingRemoteSubtitles={isSearchingRemoteSubtitles}
+				isDownloadingRemoteSubtitle={isDownloadingRemoteSubtitle}
+				remoteSubtitleError={remoteSubtitleError}
+				remoteSubtitleResults={remoteSubtitleResults}
+				castMembers={castMembers}
+				isLoadingCastMembers={isLoadingCastMembers}
+				handleSubtitleOffsetChange={handleSubtitleOffsetChange}
+				closeModal={closeModal}
+				stopPropagation={stopPropagation}
+				renderInfoPlaybackRows={renderInfoPlaybackRows}
+				renderInfoVideoExtra={renderInfoVideoExtra}
+			/>}
+		</div>
+	);
+};
+
+export default Player;

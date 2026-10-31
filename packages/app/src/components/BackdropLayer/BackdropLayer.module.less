@@ -1,0 +1,34 @@
+.globalBackdrop {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	z-index: 0;
+	overflow: hidden;
+}
+
+.globalBackdropImage {
+	position: absolute;
+	top: -3%;
+	left: -3%;
+	width: 106%;
+	height: 106%;
+	background-size: cover;
+	background-position: center;
+	background-repeat: no-repeat;
+	opacity: 0;
+	transition: opacity 0.45s ease;
+	// Without a layer of its own the engine only lifts the image out for the fade
+	// and folds it back in after, repainting the whole screen at both ends.
+	will-change: opacity;
+}
+
+.globalBackdropOverlay {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	background: var(--theme-scrim, rgba(10, 10, 10, 0.75));
+}

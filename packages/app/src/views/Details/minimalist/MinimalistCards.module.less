@@ -1,0 +1,66 @@
+@import '../../../styles/mixins.less';
+
+.card {
+	outline: none;
+}
+
+// Holds the background a card with no still of its own is left showing, which reads as artwork that
+// is missing rather than as the wrong shape.
+.artwork {
+	background: rgba(255, 255, 255, 0.1);
+	border-radius: 14px;
+	overflow: hidden;
+	position: relative;
+}
+
+.artworkImage {
+	height: 100%;
+	object-fit: cover;
+	width: 100%;
+}
+
+// The border is painted over the artwork rather than around it. Drawn around, it would make the
+// focused card wider than its neighbours and knock the rail's scrolling out of step.
+.card:focus .artwork:after {
+	border: 3px solid #fff;
+	border-radius: 14px;
+	bottom: 0;
+	content: '';
+	left: 0;
+	position: absolute;
+	right: 0;
+	top: 0;
+}
+
+// Something to count along by for anyone who cannot read the title yet, which is why it sits on the
+// artwork rather than in front of the title.
+.number {
+	background: rgba(0, 0, 0, 0.78);
+	border-radius: 14px;
+	bottom: 8px;
+	color: #fff;
+	font-size: 17px;
+	font-weight: 700;
+	left: 8px;
+	padding: 1px 11px;
+	position: absolute;
+}
+
+.watchedBadge {
+	.watched-badge(22px, 13px);
+}
+
+// The rail sits straight on the artwork with no scrim under it, so the title carries its own
+// separation.
+.title {
+	color: #fff;
+	display: -webkit-box;
+	font-size: 18px;
+	font-weight: 700;
+	line-height: 1.25;
+	margin-top: 8px;
+	overflow: hidden;
+	text-shadow: 0 2px 8px rgba(0, 0, 0, 0.92);
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+}

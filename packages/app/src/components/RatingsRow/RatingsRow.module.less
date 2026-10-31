@@ -1,0 +1,152 @@
+@import '../../styles/mixins.less';
+
+.ratingsRow {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.ratingsRow:empty {
+	display: none;
+}
+
+.ratingItem {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	background: rgba(0, 0, 0, 0.45);
+	background: rgba(var(--theme-scrim-rgb, 0, 0, 0), 0.45);
+	border-radius: 6px;
+	padding: 6px 12px;
+}
+
+.ratingItemPlain {
+	background: transparent;
+	padding: 0;
+}
+
+.ratingTop {
+	display: flex;
+	align-items: center;
+}
+
+.ratingIcon {
+	height: 32px;
+	width: auto;
+	object-fit: contain;
+	flex-shrink: 0;
+	margin-right: 7px;
+}
+
+.ratingValue {
+	font-size: 24px;
+	font-weight: 700;
+	color: #fff;
+	color: var(--theme-on-surface, #fff);
+	line-height: 1;
+	text-shadow: 0 0 6px rgba(0, 0, 0, 0.54);
+}
+
+.ratingName {
+	font-size: 16px;
+	font-weight: 500;
+	color: #fff;
+	color: var(--theme-on-surface, #fff);
+	line-height: 1.1;
+	margin-top: 2px;
+	text-shadow: 0 0 6px rgba(0, 0, 0, 0.54);
+}
+
+.communityStar {
+	color: #ffc107;
+	font-size: 28px;
+	margin-right: 6px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+/* The viewer's own star wears the accent so it never reads as another
+   community score. */
+.personalStar {
+	color: var(--theme-accent, #00a4dc);
+	font-size: 28px;
+	margin-right: 6px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+/* Compact mode - inline icon + value for media bars */
+.ratingsRowCompact {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	margin: 8px -7px -4px;
+
+	> * {
+		margin: 0 7px 8px;
+	}
+}
+
+.ratingCompact {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+}
+
+.ratingCompactBadge {
+	background: rgba(0, 0, 0, 0.45);
+	background: rgba(var(--theme-scrim-rgb, 0, 0, 0), 0.45);
+	border-radius: 6px;
+	padding: 4px 10px;
+}
+
+.ratingTopCompact {
+	display: flex;
+	align-items: center;
+}
+
+.ratingNameCompact {
+	font-size: 15px;
+	font-weight: 500;
+	color: #fff;
+	color: var(--theme-on-surface, #fff);
+	line-height: 1.1;
+	margin-top: 2px;
+	text-shadow: 0 0 6px rgba(0, 0, 0, 0.54);
+}
+
+.ratingIconCompact {
+	height: 28px;
+	width: auto;
+	object-fit: contain;
+	flex-shrink: 0;
+	margin-right: 6px;
+}
+
+.ratingValueCompact {
+	font-size: 24px;
+	font-weight: 600;
+	color: rgba(255, 255, 255, 0.9);
+	color: var(--theme-text-primary);
+	text-shadow: 1px 1px 4px rgba(0, 0, 0, 0.8);
+	line-height: 1;
+}
+
+.communityStarCompact {
+	color: #ffd700;
+	color: var(--theme-accent-secondary);
+	font-size: 26px;
+	margin-right: 6px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+.personalStarCompact {
+	color: var(--theme-accent, #00a4dc);
+	font-size: 26px;
+	margin-right: 6px;
+	line-height: 1;
+	flex-shrink: 0;
+}
+
+.ratingsRow { .flex-wrap-gap(6px; 9px); }

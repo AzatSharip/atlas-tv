@@ -1,0 +1,60 @@
+@import '../../styles/mixins.less';
+
+.container {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	max-width: 560px;
+}
+
+// What is happening on the left, how far along on the right. The left side
+// ellipsizes so the percentage always survives.
+.label {
+	display: flex;
+	justify-content: flex-end;
+	font-size: 22px;
+	color: rgba(255, 255, 255, 0.7);
+	white-space: nowrap;
+}
+
+.leading {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.separator,
+.percent {
+	flex-shrink: 0;
+}
+
+.track {
+	height: 8px;
+	background: rgba(80, 80, 80, 0.85);
+	border-radius: 999px;
+	overflow: hidden;
+}
+
+// A poster tile gives the label a fraction of the width the details screen does.
+.compact .label {
+	font-size: 17px;
+}
+
+.compact .track {
+	height: 6px;
+}
+
+// The poll is slow, so the fill eases across rather than jumping between ticks.
+.fill {
+	height: 100%;
+	background: var(--theme-range-progress, #ffffff);
+	transition: width 0.6s ease-out;
+	border-radius: inherit;
+
+	:global(.perf-low) & {
+		transition: none;
+	}
+}
+
+.container { .flex-col-gap(6px); }

@@ -1,0 +1,17 @@
+{
+	"name": "@moonfin/platform-tizen",
+	"version": "2.10.0",
+	"private": true,
+	"main": "src/index.js",
+	"exports": {
+		".": "./src/index.js",
+		"./storage": "./src/storage.js",
+		"./deviceProfile": "./src/deviceProfile.js",
+		"./deviceInfo": "./src/deviceInfo.js",
+		"./video": "./src/video.js",
+		"./smarthub": "./src/smarthub.js",
+		"./keys": "./src/keys.js",
+		"./volume": "./src/volume.js",
+		"./countryCode": "./src/countryCode.js"
+	}
+}

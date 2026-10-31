@@ -1,0 +1,2001 @@
+import {useState, useCallback, useEffect, useMemo, lazy, Suspense, useRef} from 'react';
+import {isKidsMode, blockedPanels, allowedPanel} from '../utils/kidsMode';
+import {
+	hashPin, pinMatches, lockoutRemaining, registerFailedAttempt, clearedLockout, tooManyAttempts,
+	SIGN_IN_PIN
+} from '../utils/pinLockout';
+import ThemeDecorator from '@enact/sandstone/ThemeDecorator';
+import {Panels, Panel} from '@enact/sandstone/Panels';
+import Spottable from '@enact/spotlight/Spottable';
+import Spotlight from '@enact/spotlight';
+import $L from '@enact/i18n/$L';
+
+import ilib from 'ilib';
+
+import {AuthProvider, useAuth} from '../context/AuthContext';
+import {useSettings} from '../context/SettingsContext';
+import * as connectionPool from '../services/connectionPool';
+import * as jellyfinApi from '../services/jellyfinApi';
+import {adoptLegacyBlockedRatings, loadParentalControls, parentalScopeKey, setParentalScope} from '../services/parentalControls';
+import {libraryIdOf, seerrDetailStub} from '../utils/seerrTarget';
+import serverLogger from '../services/serverLogger';
+import * as remoteControl from '../services/remoteControl';
+import {isBackKey, KEYS} from '../utils/keys';
+import {applyPerfTier} from '../utils/perfTier';
+import {isLiveTvChannel, isLiveTvLibrary} from '../utils/liveTvLibrary';
+import {OLED_TUNING} from '../utils/oledMode';
+import {isTizen} from '../platform';
+import {initVideo, cleanupVideoElement, setupVisibilityHandler, setupPlatformLifecycle} from '../services/video';
+import {activateApp, exitApp} from '../utils/appLifecycle';
+import {SettingsProvider} from '../context/SettingsContext';
+import {seedLanguagePreferences} from '../utils/languagePrefSeed';
+import {shouldRun as shouldRunSetupWizard, beginRerun as beginSetupWizardRerun} from '../utils/setupWizardGate';
+import {getActiveServer} from '../services/multiServerManager';
+import {SeerrProvider, useSeerr} from '../context/SeerrContext';
+import {AchievementsProvider, useAchievements} from '../context/AchievementsContext';
+import {achievementIconPath} from '../views/Settings/achievements/achievementIcons';
+import {threadIsPhoto} from '../utils/achievementsModel';
+import {ServerMessagesProvider, useServerMessages} from '../context/ServerMessagesContext';
+import {SyncPlayProvider, useSyncPlay} from '../context/SyncPlayContext';
+import {useVersionCheck} from '../hooks/useVersionCheck';
+import UpdateNotification from '../components/UpdateNotification';
+import {ItemMenuProvider} from '../components/ItemContextMenu';
+import SeerrNotificationToast from '../components/SeerrNotificationToast';
+import ServerMessagesDialog from '../components/ServerMessagesDialog';
+import DebugOverlay from '../components/DebugOverlay'; // Red Button on TV remote toggles this
+import NavBar from '../components/NavBar';
+import Sidebar from '../components/Sidebar';
+import AccountModal from '../components/AccountModal';
+import ExitDialog from '../components/ExitDialog';
+import LoadingSpinner from '../components/LoadingSpinner';
+import Screensaver from '../components/Screensaver';
+import SeasonalTheme from '../components/SeasonalTheme';
+import NoConnection from '../components/NoConnection/NoConnection';
+import SyncPlayDialog from '../components/SyncPlayDialog';
+import PhotoViewer from '../components/PhotoViewer';
+import ComicViewer from '../components/ComicViewer';
+import SettingsPanel from '../components/SettingsPanel';
+import ShuffleOverlay from '../components/ShuffleOverlay';
+import SpottableInput from '../components/SpottableInput/SpottableInput';
+import TVKeyboard from '../components/TVKeyboard/TVKeyboard';
+import {isTvKeyboardVisible, closeTvKeyboard} from '../components/TVKeyboard/keyboardBus';
+import useInactivityTimer from '../hooks/useInactivityTimer';
+import {useThemeMusic} from '../hooks/useThemeMusic';
+import {buildThemeCssVars, toRgbTriplet} from '../theme/themeSpec';
+import {applyThemeOverrides} from '../theme/themeOverrides';
+import {resolveOverlayColor} from '../theme/overlayColors';
+import Login from '../views/Login';
+import Browse from '../views/Browse';
+import {isGameLibrary, refreshGameLibraries, resolveGameLibraryId} from '../utils/gameLibrary';
+
+const Details = lazy(() => import('../views/Details'));
+const Library = lazy(() => import('../views/Library'));
+const Search = lazy(() => import('../views/Search'));
+const Settings = lazy(() => import('../views/Settings'));
+const Player = lazy(() => import('../views/Player'));
+const Favorites = lazy(() => import('../views/Favorites'));
+const Genres = lazy(() => import('../views/Genres'));
+const GenreBrowse = lazy(() => import('../views/GenreBrowse'));
+const Person = lazy(() => import('../views/Person'));
+const LiveTV = lazy(() => import('../views/LiveTV'));
+const Recordings = lazy(() => import('../views/Recordings'));
+const SeerrDiscover = lazy(() => import('../views/SeerrDiscover'));
+const SeerrRequests = lazy(() => import('../views/SeerrRequests'));
+const SeerrBrowse = lazy(() => import('../views/SeerrBrowse'));
+const SeerrPerson = lazy(() => import('../views/SeerrPerson'));
+const SeerrCollection = lazy(() => import('../views/SeerrCollection'));
+const Games = lazy(() => import('../views/Games'));
+const GameSystem = lazy(() => import('../views/GameSystem'));
+const GameDetails = lazy(() => import('../views/GameDetails'));
+const GamePlayer = lazy(() => import('../views/GamePlayer'));
+const SetupWizard = lazy(() => import('../views/SetupWizard'));
+
+import '../styles/perf-overrides.less';
+import css from './App.module.less';
+
+const MAX_HISTORY_LENGTH = 10;
+const SpottableButton = Spottable('button');
+
+const isAudioItem = (item) => item?.MediaType === 'Audio' || item?.Type === 'Audio';
+
+const normalizeSeerrSelection = (item) => {
+	if (!item) return null;
+
+	const normalizedType = item.mediaType || item.media_type || item.type || item.Type;
+	const mediaType = normalizedType === 'movie' || normalizedType === 'Movie'
+		? 'movie'
+		: normalizedType === 'tv' || normalizedType === 'show' || normalizedType === 'Series' || normalizedType === 'Tv'
+			? 'tv'
+			: item.title
+				? 'movie'
+				: 'tv';
+
+	const mediaId = item.mediaId || item.tmdbId || item.id || item.Id || item.media?.tmdbId || item.media?.id;
+	// External rows key some titles by IMDb id alone, which the detail screen
+	// resolves through a Seerr search.
+	const imdbId = item.imdbId || null;
+	if (mediaId == null && !imdbId) return null;
+
+	const libraryId = item.libraryId || item._seerrLibraryId ||
+		libraryIdOf(item.mediaInfo) || libraryIdOf(item.media);
+
+	return {mediaId, mediaType, libraryId, imdbId, title: item.title || null};
+};
+
+const PanelLoader = () => (
+	<div className={css.panelLoader}>
+		<LoadingSpinner />
+	</div>
+);
+
+const PANELS = {
+	LOGIN: 0,
+	BROWSE: 1,
+	DETAILS: 2,
+	LIBRARY: 3,
+	SEARCH: 4,
+	SETTINGS: 5,
+	PLAYER: 6,
+	FAVORITES: 7,
+	GENRES: 8,
+	PERSON: 9,
+	LIVETV: 10,
+	SEERR_DISCOVER: 11,
+	SEERR_REQUESTS: 12,
+	GENRE_BROWSE: 13,
+	RECORDINGS: 14,
+	SEERR_BROWSE: 15,
+	SEERR_PERSON: 16,
+	ADD_SERVER: 17,
+	ADD_USER: 18,
+	GAMES: 19,
+	GAME_DETAILS: 20,
+	GAME_PLAYER: 21,
+	SEERR_COLLECTION: 22,
+	GAME_SYSTEM: 23
+};
+
+const AppContent = (props) => {
+	const {isAuthenticated, isLoading, logout, serverUrl, serverName, api, user, hasMultipleServers, accessToken, connectionState, revalidateSession} = useAuth();
+	const {settings, activeTheme, syncOnLogin, updateSettings, loaded: settingsLoaded} = useSettings();
+	const {streamNotification, dismissStreamNotification, pluginInfo} = useSeerr();
+	const {pendingPopups, markPopupsRead} = useServerMessages();
+	const themeMusic = useThemeMusic();
+	const {openDialog: openSyncPlay, closeDialog: closeSyncPlay, isDialogOpen: syncPlayDialogOpen, playQueueUpdate: syncPlayQueueUpdate, isInGroup: isSyncPlayInGroup, setNewQueue: syncPlaySetNewQueue, getGroupPositionTicks: getSyncPlayPositionTicks} = useSyncPlay();
+	const handledSyncPlayQueueRef = useRef(null);
+
+	const [remoteMessage, setRemoteMessage] = useState(null);
+	const clearRemoteMessage = useCallback(() => setRemoteMessage(null), []);
+	const unifiedMode = settings.unifiedLibraryMode && hasMultipleServers;
+
+	// Blocked ratings belong to whoever is signed in on this server.
+	useEffect(() => {
+		loadParentalControls();
+		setParentalScope(parentalScopeKey(serverUrl, user?.Id));
+	}, [serverUrl, user?.Id]);
+
+	// The list used to be kept once for the whole TV. Whoever is signed in takes it, and the old
+	// copy goes so the next account starts from its own.
+	const legacyBlockedRatings = settings.blockedRatings;
+	useEffect(() => {
+		if (!settingsLoaded || !user?.Id || !Array.isArray(legacyBlockedRatings)) return undefined;
+		let cancelled = false;
+		loadParentalControls().then(() => {
+			if (!cancelled && adoptLegacyBlockedRatings(legacyBlockedRatings)) {
+				updateSettings({blockedRatings: undefined});
+			}
+		});
+		return () => { cancelled = true; };
+	}, [settingsLoaded, user?.Id, serverUrl, legacyBlockedRatings, updateSettings]);
+
+	const [panelIndex, setPanelIndex] = useState(PANELS.LOGIN);
+
+	// Banners for badges the user just unlocked, shown in turn so they dont stack. The plugin's
+	// grouping setting decides between one banner for the lot and one each.
+	const {unlocks, clearUnlocks, incomingMessages, shownIncomingMessage} = useAchievements();
+	const [badgeToasts, setBadgeToasts] = useState([]);
+	const showNextBadgeToast = useCallback(() => setBadgeToasts((queue) => queue.slice(1)), []);
+	useEffect(() => {
+		if (!unlocks) return;
+		clearUnlocks();
+		if (unlocks.muteDuringPlayback && panelIndex === PANELS.PLAYER) return;
+		const {badges} = unlocks;
+		if (unlocks.grouped && badges.length > 1) {
+			const top = badges.reduce((best, badge) => (badge.score > best.score ? badge : best));
+			const names = badges.slice(0, 3).map((badge) => badge.title).join(', ');
+			const more = badges.length - 3;
+			setBadgeToasts((queue) => [...queue, {
+				key: unlocks.key,
+				title: $L('{count} achievements unlocked').replace('{count}', String(badges.length)),
+				body: more > 0 ? `${names} ${$L('+{count} more').replace('{count}', String(more))}` : names,
+				icon: achievementIconPath(top.icon)
+			}]);
+			return;
+		}
+		setBadgeToasts((queue) => [...queue, ...badges.map((badge, index) => ({
+			key: `${unlocks.key}-${index}`,
+			title: $L('Achievement unlocked'),
+			body: badge.title,
+			icon: achievementIconPath(badge.icon)
+		}))]);
+	}, [unlocks, clearUnlocks, panelIndex]);
+
+	// A banner for a chat that got a message from someone else, one at a time. Held back over
+	// a film when the mute setting says so, which is on unless the viewer turned it off.
+	const incomingThread = incomingMessages[0] || null;
+	const muteChat = settings.muteChatBannersDuringPlayback !== false && panelIndex === PANELS.PLAYER;
+	useEffect(() => {
+		if (incomingThread && muteChat) shownIncomingMessage();
+	}, [incomingThread, muteChat, shownIncomingMessage]);
+	const chatToast = incomingThread && !muteChat ? {
+		key: `${incomingThread.conversationId}-${incomingThread.lastAt ? incomingThread.lastAt.getTime() : incomingThread.unreadCount}`,
+		title: $L('New message from {name}').replace('{name}', incomingThread.name),
+		body: threadIsPhoto(incomingThread) ? $L('Photo') : incomingThread.lastMessage,
+		icon: achievementIconPath('forum')
+	} : null;
+	const [selectedItem, setSelectedItem] = useState(null);
+	const [selectedLibrary, setSelectedLibrary] = useState(null);
+	const [selectedGameLibrary, setSelectedGameLibrary] = useState(null);
+	const [selectedGameSystem, setSelectedGameSystem] = useState(null);
+	const [selectedGame, setSelectedGame] = useState(null);
+	const [gameStartFresh, setGameStartFresh] = useState(false);
+	const [selectedPerson, setSelectedPerson] = useState(null);
+	const [selectedGenre, setSelectedGenre] = useState(null);
+	const [genreFilter, setGenreFilter] = useState(null);
+	const [studioFilter, setStudioFilter] = useState(null);
+	const [playingItem, setPlayingItem] = useState(null);
+	const [playbackOptions, setPlaybackOptions] = useState(null);
+	const [isResume, setIsResume] = useState(false);
+	const [isPlayerPaused, setIsPlayerPaused] = useState(false);
+	const [trailerPreviewActive, setTrailerPreviewActive] = useState(false);
+	const [panelHistory, setPanelHistory] = useState([]);
+	const [seerrBrowse, setSeerrBrowse] = useState(null);
+	const [seerrPerson, setSeerrPerson] = useState(null);
+	const [authChecked, setAuthChecked] = useState(false);
+	const [libraries, setLibraries] = useState([]);
+	const [showAccountModal, setShowAccountModal] = useState(false);
+	const [showServerMessages, setShowServerMessages] = useState(false);
+	const serverMessagesBackRef = useRef(null);
+	const [showExitDialog, setShowExitDialog] = useState(false);
+	const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+	// The screen the settings panel opens on when something other than the gear opened it.
+	const [settingsInitialView, setSettingsInitialView] = useState(null);
+	const [showShuffleOverlay, setShowShuffleOverlay] = useState(false);
+	const [shuffleOriginSpotlightId, setShuffleOriginSpotlightId] = useState('navbar-shuffle');
+	const [pinCodeInput, setPinCodeInput] = useState('');
+	const [pinCodeError, setPinCodeError] = useState('');
+	const [isPinUnlocked, setIsPinUnlocked] = useState(false);
+	const [setupWizardActive, setSetupWizardActive] = useState(false);
+	const setupWizardBackRef = useRef(null);
+	const cleanupHandlersRef = useRef(null);
+	const backHandlerRef = useRef(null);
+	const itemMenuBackRef = useRef(null);
+	const detailsItemStackRef = useRef([]);
+	// Play from a card's menu opens the item's screen, which starts it once it knows what to play.
+	const [detailsAutoPlay, setDetailsAutoPlay] = useState(false);
+	const [seerrCollection, setSeerrCollection] = useState(null);
+	const prevUserIdRef = useRef(null);
+	const [photoViewerItem, setPhotoViewerItem] = useState(null);
+	const [photoViewerItems, setPhotoViewerItems] = useState([]);
+	const [comicViewerItem, setComicViewerItem] = useState(null);
+	const {updateInfo, formattedNotes, dismiss: dismissUpdate} = useVersionCheck(
+		isAuthenticated && settings.updateNotificationsEnabled !== false ? 3000 : null
+	);
+	// A PIN saved before this client started hashing is still stored as itself, so both are
+	// offered and the plain one is written back as a hash the first time it is entered.
+	const storedPin = useMemo(() => ({
+		hash: settings.pinCodeHash,
+		plain: typeof settings.pinCode === 'string' && /^\d{4}$/.test(settings.pinCode)
+			? settings.pinCode
+			: '0000'
+	}), [settings.pinCodeHash, settings.pinCode]);
+	const isPinGateActive = isAuthenticated && settings.pinCodeProtection === true && !isPinUnlocked;
+	const screensaverTimeout = Number(settings.screensaverTimeout || 90);
+	const screensaverEnabled = Boolean(
+		settings.screensaverEnabled &&
+		isAuthenticated &&
+		panelIndex !== PANELS.LOGIN &&
+		(panelIndex !== PANELS.PLAYER || isPlayerPaused) &&
+		// Emulator input bypasses Spotlight (paused during gameplay), so inactivity never resets.
+		panelIndex !== PANELS.GAME_PLAYER &&
+		// A media bar trailer plays without any key presses to reset the timer.
+		!trailerPreviewActive &&
+		!showExitDialog &&
+		!showShuffleOverlay &&
+		!showSettingsPanel &&
+		!showAccountModal &&
+		!showServerMessages &&
+		!photoViewerItem &&
+		!comicViewerItem
+	);
+	const {isInactive: showScreensaver, dismiss: dismissScreensaver, wake: wakeScreensaver} = useInactivityTimer(screensaverTimeout, screensaverEnabled);
+
+	useEffect(() => {
+		window.dispatchEvent(new CustomEvent('moonfin:screensaver', {detail: {active: showScreensaver}}));
+	}, [showScreensaver]);
+
+	useEffect(() => {
+		const handleTrailerPreview = (e) => setTrailerPreviewActive(!!e.detail?.active);
+		window.addEventListener('moonfin:trailerPreview', handleTrailerPreview);
+		return () => window.removeEventListener('moonfin:trailerPreview', handleTrailerPreview);
+	}, []);
+
+	// The logging switches used to reach the logger only from the settings toggle, so
+	// turning one on and restarting the TV left it doing nothing until Settings was opened
+	// again. Following the settings here is what makes them survive a restart.
+	useEffect(() => {
+		serverLogger.init({
+			getAuth: () => ({
+				serverUrl: jellyfinApi.getServerUrl(),
+				accessToken: jellyfinApi.getApiKey(),
+				serverType: jellyfinApi.getServerType(),
+				authHeader: jellyfinApi.getAuthHeader()
+			})
+		});
+	}, []);
+
+	useEffect(() => {
+		serverLogger.setClientLogSupported(pluginInfo?.clientLogSupported === true);
+	}, [pluginInfo]);
+
+	useEffect(() => {
+		serverLogger.setEnabled(settings.serverLogging === true);
+	}, [settings.serverLogging]);
+
+	useEffect(() => {
+		serverLogger.setRecording(settings.diagnosticLoggingEnabled === true);
+	}, [settings.diagnosticLoggingEnabled]);
+
+	useEffect(() => {
+		if (!isAuthenticated) {
+			setIsPinUnlocked(false);
+			setPinCodeInput('');
+			setPinCodeError('');
+			return;
+		}
+		if (settings.pinCodeProtection === true) {
+			setIsPinUnlocked(false);
+			setPinCodeInput('');
+			setPinCodeError('');
+			return;
+		}
+		setIsPinUnlocked(true);
+		setPinCodeInput('');
+		setPinCodeError('');
+	}, [isAuthenticated, settings.pinCodeProtection, user?.Id]);
+
+	useEffect(() => {
+		if (isAuthenticated && serverUrl && accessToken) {
+			syncOnLogin(serverUrl, accessToken).catch((err) => {
+				console.warn('[App] Initial settings sync failed:', err.message);
+			});
+		}
+	}, [isAuthenticated, serverUrl, accessToken, syncOnLogin]);
+
+	// The setup wizard asks its questions once per server and user, so this
+	// only flips the flag for a pair that has never finished it. A server that
+	// cant be reached cant serve the previews or resolve the settings the
+	// wizard would otherwise overwrite, so that launch leaves the flag alone
+	// and a later one, on a better network, still gets the chance.
+	useEffect(() => {
+		if (!isAuthenticated) {
+			setSetupWizardActive(false);
+			return undefined;
+		}
+		if (!settingsLoaded || !user?.Id || connectionState === 'disconnected') return undefined;
+		let cancelled = false;
+		(async () => {
+			const activeServer = await getActiveServer().catch(() => null);
+			const run = await shouldRunSetupWizard(activeServer?.id, serverUrl, user.Id);
+			if (!cancelled && run) setSetupWizardActive(true);
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [isAuthenticated, settingsLoaded, user?.Id, serverUrl, connectionState]);
+
+	useEffect(() => {
+		if (!isAuthenticated || !user?.Configuration) return;
+		const seeded = seedLanguagePreferences(settings, user.Configuration, settings.uiLanguage, window.navigator?.language);
+		if (Object.keys(seeded).length > 0) updateSettings(seeded);
+	}, [isAuthenticated, user, settings, updateSettings]);
+
+	useEffect(() => {
+		if (!isPinGateActive) return;
+		const timer = setTimeout(() => {
+			Spotlight.focus('[data-spotlight-id="app-pin-input"]');
+		}, 100);
+		return () => clearTimeout(timer);
+	}, [isPinGateActive]);
+
+	const fetchLibraries = useCallback(async () => {
+		if (isAuthenticated && api && user) {
+			try {
+				let libs;
+				if (unifiedMode) {
+					libs = await connectionPool.getLibrariesFromAllServers();
+					libs = libs.map(lib => ({
+						...lib,
+						Name: `${lib.Name} (${lib._serverName})`
+					}));
+				} else {
+					const result = await api.getLibraries();
+					libs = result.Items || [];
+				}
+				setLibraries(libs);
+				// Warm the plugin's game library list so selecting a tile can tell a game
+				// library from a normal one without waiting on a request.
+				refreshGameLibraries();
+			} catch (err) {
+				console.error('Failed to fetch libraries:', err);
+			}
+		} else {
+			setLibraries([]);
+		}
+	}, [isAuthenticated, api, user, unifiedMode]);
+
+	useEffect(() => {
+		fetchLibraries();
+	}, [fetchLibraries]);
+
+	useEffect(() => {
+		const root = document.documentElement;
+		const vars = buildThemeCssVars(activeTheme);
+		for (let index = 0; index < 16; index += 1) {
+			const navVarName = `--theme-nav-color-${index + 1}`;
+			if (!Object.prototype.hasOwnProperty.call(vars, navVarName)) {
+				root.style.removeProperty(navVarName);
+			}
+		}
+		for (const [key, value] of Object.entries(vars)) {
+			root.style.setProperty(key, value);
+		}
+		if (activeTheme?.id) {
+			root.setAttribute('data-theme-id', activeTheme.id);
+		}
+	}, [activeTheme]);
+
+	// The custom properties above only reach the newer engines. The injected
+	// stylesheet carries the same theme as literal colors for everything older.
+	useEffect(() => {
+		applyThemeOverrides(activeTheme, {
+			focusBorderColor: settings.focusBorderColor,
+			mediaBarOverlayColor: settings.mediaBarOverlayColor,
+			mediaBarOverlayOpacity: settings.mediaBarOverlayOpacity
+		});
+	}, [activeTheme, settings.focusBorderColor, settings.mediaBarOverlayColor, settings.mediaBarOverlayOpacity]);
+
+	useEffect(() => {
+		applyPerfTier(settings.performanceMode === 'auto' ? null : settings.performanceMode);
+	}, [settings.performanceMode]);
+
+	// The surfaces are crushed on the theme itself, so all this has to do is tell
+	// the stylesheet which artwork boost to draw with.
+	useEffect(() => {
+		const root = document.documentElement;
+		if (OLED_TUNING[settings.oledMode]) root.setAttribute('data-oled', settings.oledMode);
+		else root.removeAttribute('data-oled');
+	}, [settings.oledMode]);
+
+	useEffect(() => {
+		const root = document.documentElement;
+		if (settings.focusBorderColor) {
+			root.style.setProperty('--theme-focus-border-color', settings.focusBorderColor);
+		}
+		root.style.setProperty('--theme-navbar-color-rgb', toRgbTriplet(resolveOverlayColor(settings.navbarColor)));
+	}, [activeTheme, settings.focusBorderColor, settings.navbarColor]);
+
+	useEffect(() => {
+		const scale = settings.uiScale || 1.0;
+		if (typeof document === 'undefined' || typeof window === 'undefined') return;
+		const html = document.documentElement;
+		const previousInlineFontSize = html.style.fontSize || '';
+
+		if (scale === 1.0) {
+			if (previousInlineFontSize) {
+				html.style.fontSize = previousInlineFontSize;
+			} else {
+				html.style.removeProperty('font-size');
+			}
+			return;
+		}
+
+		const computed = window.getComputedStyle(html).fontSize;
+		const basePx = Number.parseFloat(computed);
+		const safeBasePx = Number.isFinite(basePx) && basePx > 0 ? basePx : 24;
+		const targetPx = Math.round(safeBasePx * scale * 10) / 10;
+
+		const applyScale = () => {
+			const current = Number.parseFloat(html.style.fontSize);
+			if (Number.isFinite(current) && Math.abs(current - targetPx) < 0.1) return;
+			html.style.fontSize = `${targetPx}px`;
+		};
+
+		applyScale();
+
+		const observer = new window.MutationObserver(() => applyScale());
+		observer.observe(html, {attributes: true, attributeFilter: ['style', 'class']});
+
+		window.addEventListener('resize', applyScale);
+		return () => {
+			observer.disconnect();
+			window.removeEventListener('resize', applyScale);
+			if (previousInlineFontSize) {
+				html.style.fontSize = previousInlineFontSize;
+			} else {
+				html.style.removeProperty('font-size');
+			}
+		};
+	}, [settings.uiScale]);
+
+	const THEME_MUSIC_TYPES = ['Movie', 'Series', 'Season', 'Episode'];
+
+	useEffect(() => {
+		if (panelIndex === PANELS.DETAILS && selectedItem && THEME_MUSIC_TYPES.includes(selectedItem.Type)) {
+			themeMusic.playThemeMusic(selectedItem.SeriesId || selectedItem.Id);
+		} else if (panelIndex === PANELS.PLAYER) {
+			themeMusic.stopThemeMusicImmediate();
+		} else if (panelIndex !== PANELS.DETAILS) {
+			themeMusic.cancelDelayed();
+			themeMusic.stopThemeMusic();
+		}
+	}, [panelIndex, selectedItem?.Id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+	// The hardware decoder stays claimed until these are torn down.
+	const releaseVideoElements = useCallback(() => {
+		const videoElements = document.querySelectorAll('video');
+		videoElements.forEach(video => {
+			cleanupVideoElement(video);
+		});
+	}, []);
+
+	// Belongs to leaving and nowhere else. Dropping the handlers on any other path costs
+	// the app the listener it is reopened through, and webOS has no other way back in.
+	const performAppCleanup = useCallback(() => {
+		cleanupHandlersRef.current?.();
+		cleanupHandlersRef.current = null;
+		releaseVideoElements();
+	}, [releaseVideoElements]);
+
+	useEffect(() => {
+		if (typeof window === 'undefined') return;
+
+		// Handle app being closed/hidden (beforeunload, pagehide)
+		const handleBeforeUnload = () => {
+			performAppCleanup();
+		};
+
+		const handlePageHide = (event) => {
+			if (!event.persisted) {
+				performAppCleanup();
+			}
+		};
+
+		const handleVisibilityHidden = () => {
+			const videoElements = document.querySelectorAll('video');
+			videoElements.forEach(video => {
+				if (!video.paused) {
+					video.pause();
+				}
+			});
+		};
+
+		const handleVisibilityVisible = () => {
+			revalidateSession();
+		};
+
+		const handleRelaunch = () => {
+			// The app is held in the background until it activates, so a throw on the way
+			// there must not be allowed to skip it.
+			try {
+				releaseVideoElements();
+				setPlayingItem(null);
+				setPanelHistory([]);
+				if (isAuthenticated && settings.pinCodeProtection === true) {
+					setIsPinUnlocked(false);
+					setPinCodeInput('');
+					setPinCodeError('');
+				}
+				if (isAuthenticated) {
+					setPanelIndex(PANELS.BROWSE);
+				}
+			} finally {
+				activateApp();
+			}
+		};
+
+		window.addEventListener('beforeunload', handleBeforeUnload);
+		window.addEventListener('pagehide', handlePageHide);
+
+		// Put on without waiting for the video module, since the app is reopened through it.
+		const removeLifecycleHandler = setupPlatformLifecycle(handleRelaunch);
+
+		let removeVisibilityHandler;
+		let cancelled = false;
+
+		initVideo().then(() => {
+			if (cancelled) return;
+			removeVisibilityHandler = setupVisibilityHandler(handleVisibilityHidden, handleVisibilityVisible);
+		}).catch(() => {});
+
+		if (isTizen()) {
+			import('@moonfin/platform-tizen/smarthub').then(m => m.initSmartHub()).catch(() => {});
+		}
+
+		cleanupHandlersRef.current = () => {
+			window.removeEventListener('beforeunload', handleBeforeUnload);
+			window.removeEventListener('pagehide', handlePageHide);
+			removeVisibilityHandler?.();
+			removeLifecycleHandler?.();
+		};
+
+		return () => {
+			cancelled = true;
+			if (cleanupHandlersRef.current) {
+				cleanupHandlersRef.current();
+			}
+		};
+	}, [isAuthenticated, performAppCleanup, releaseVideoElements, revalidateSession, settings.pinCodeProtection]);
+
+	useEffect(() => {
+		if (!isAuthenticated || !user?.Id) {
+			prevUserIdRef.current = null;
+			return;
+		}
+
+		if (user.Id !== prevUserIdRef.current) {
+			prevUserIdRef.current = user.Id;
+			setPanelHistory([]);
+			setPanelIndex(PANELS.BROWSE);
+		}
+	}, [user?.Id, isAuthenticated]);
+
+
+	useEffect(() => {
+		if (!isLoading && !authChecked) {
+			setAuthChecked(true);
+			if (isAuthenticated) {
+				setPanelIndex(PANELS.BROWSE);
+			}
+		}
+	}, [isLoading, isAuthenticated, authChecked]);
+
+	const kidsBlockedPanels = useMemo(() => blockedPanels(PANELS), []);
+
+	const showPanel = useCallback((panel) => {
+		setPanelIndex(isKidsMode(settings)
+			? allowedPanel(panel, kidsBlockedPanels, PANELS.BROWSE)
+			: panel);
+	}, [settings, kidsBlockedPanels]);
+
+	const navigateTo = useCallback((panel, addToHistory = true) => {
+		if (addToHistory && panelIndex !== PANELS.LOGIN) {
+			setPanelHistory(prev => {
+				const newHistory = [...prev, panelIndex];
+				if (newHistory.length > MAX_HISTORY_LENGTH) {
+					return newHistory.slice(-MAX_HISTORY_LENGTH);
+				}
+				return newHistory;
+			});
+		}
+		showPanel(panel);
+	}, [panelIndex, showPanel]);
+
+	const handleBack = useCallback(() => {
+		detailsItemStackRef.current = [];
+		if (panelIndex === PANELS.ADD_SERVER || panelIndex === PANELS.ADD_USER) {
+			setPanelHistory([]);
+			setPanelIndex(PANELS.SETTINGS);
+			return;
+		}
+		if (panelHistory.length > 0) {
+			const prevPanel = panelHistory[panelHistory.length - 1];
+			setPanelHistory(prev => prev.slice(0, -1));
+			setPanelIndex(prevPanel);
+		} else if (panelIndex > PANELS.BROWSE) {
+			setPanelIndex(PANELS.BROWSE);
+		}
+	}, [panelHistory, panelIndex]);
+
+	useEffect(() => {
+		const handleKeyDown = (e) => {
+			// An arrow press means the user is done pointing. Spotlight flips
+			// this itself, but its window listener sits behind components that
+			// stop propagation, and a set pointer flag makes every programmatic
+			// focus move a no op. This runs in capture, so the flag is down
+			// before any component handles the key.
+			if ((e.keyCode === KEYS.UP || e.keyCode === KEYS.DOWN || e.keyCode === KEYS.LEFT || e.keyCode === KEYS.RIGHT) && Spotlight.getPointerMode()) {
+				Spotlight.setPointerMode(false);
+			}
+			if (showShuffleOverlay) {
+				return;
+			}
+			if (isTvKeyboardVisible()) {
+				return;
+			}
+			if (e.keyCode === KEYS.BACKSPACE && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+				return;
+			}
+			if (isBackKey(e)) {
+				e.preventDefault();
+				e.stopPropagation();
+
+				if (isPinGateActive) {
+					return;
+				}
+
+				if (setupWizardActive) {
+					setupWizardBackRef.current?.();
+					return;
+				}
+
+				if (showExitDialog) {
+					return;
+				}
+
+				// The dialog closes itself on back, but its listener shares the
+				// window with this one and stopPropagation does not reach a
+				// sibling, so the same press otherwise falls through to the
+				// panel underneath and asks to exit the app.
+				if (syncPlayDialogOpen) {
+					closeSyncPlay();
+					return;
+				}
+
+				if (updateInfo) {
+					dismissUpdate();
+					return;
+				}
+
+				if (showAccountModal) {
+					setShowAccountModal(false);
+					return;
+				}
+
+				if (showServerMessages) {
+					if (!serverMessagesBackRef.current?.()) setShowServerMessages(false);
+					return;
+				}
+
+				if (showSettingsPanel) {
+					return;
+				}
+
+				if (itemMenuBackRef.current?.()) return;
+
+				if (panelIndex === PANELS.BROWSE || panelIndex === PANELS.LOGIN) {
+					// Sign-in walks its own screens, and home returns a scrolled row
+					// list to the top, before back means exit
+					if (backHandlerRef.current?.()) return;
+					// Another client pressing back never closes the app on the viewer.
+					if (e.fromRemote) return;
+					if (settings.exitConfirmation === false) {
+						performAppCleanup();
+						exitApp();
+					} else {
+						setShowExitDialog(true);
+					}
+					return;
+				}
+				if (panelIndex === PANELS.PLAYER || panelIndex === PANELS.SETTINGS) {
+					return;
+				}
+				if (backHandlerRef.current?.()) return;
+				// Pop item stack for same-panel back navigation
+				if (panelIndex === PANELS.DETAILS && detailsItemStackRef.current.length > 0) {
+					setSelectedItem(detailsItemStackRef.current.pop());
+					return;
+				}
+				handleBack();
+			}
+		};
+
+		window.addEventListener('keydown', handleKeyDown, true);
+		return () => window.removeEventListener('keydown', handleKeyDown, true);
+	}, [panelIndex, handleBack, performAppCleanup, settings.exitConfirmation, showAccountModal, showServerMessages, showExitDialog, showSettingsPanel, showShuffleOverlay, isPinGateActive, setupWizardActive, updateInfo, dismissUpdate, syncPlayDialogOpen, closeSyncPlay]);
+
+	const handleLoggedIn = useCallback(() => {
+		setPanelHistory([]);
+		navigateTo(PANELS.BROWSE, false);
+	}, [navigateTo]);
+
+	// Every way out of the wizard lands on home, whether it was the first run
+	// or a re run started from Settings.
+	const handleSetupWizardDone = useCallback(() => {
+		setSetupWizardActive(false);
+		setShowSettingsPanel(false);
+		setPanelHistory([]);
+		navigateTo(PANELS.BROWSE, false);
+	}, [navigateTo]);
+
+	const handleRunSetupWizard = useCallback(() => {
+		beginSetupWizardRerun();
+		setSetupWizardActive(true);
+	}, []);
+
+	const handleShuffle = useCallback(() => {
+		const current = Spotlight.getCurrent();
+		const spotlightId = current?.getAttribute?.('data-spotlight-id') || current?.id || 'navbar-shuffle';
+		setShuffleOriginSpotlightId(spotlightId);
+		setShowShuffleOverlay(true);
+	}, []);
+
+	// The guide hands over its lineup, in its own order, for the player's channel carousel.
+	const handlePlayChannel = useCallback((channel, lineup) => {
+		setPlayingItem(channel);
+		setPlaybackOptions(lineup?.length ? {liveTvChannels: lineup} : null);
+		setIsResume(false);
+		navigateTo(PANELS.PLAYER);
+	}, [navigateTo]);
+
+	const handleSelectItem = useCallback((item) => {
+		if (window.AtlasFolders.matches(item)) {
+			window.AtlasFolders.play(item, null, (options) => {
+				setPlayingItem(item);
+				setPlaybackOptions(options || null);
+				setIsResume(false);
+				navigateTo(PANELS.PLAYER);
+			});
+			return;
+		}
+		setDetailsAutoPlay(false);
+		// A channel has no details worth landing on, so it tunes straight away.
+		if (isLiveTvChannel(item)) {
+			handlePlayChannel(item);
+			return;
+		}
+		if (item.Type === 'Photo') {
+			setPhotoViewerItem(item);
+			return;
+		}
+		if (item.Type === 'PhotoAlbum') {
+			setSelectedLibrary(item);
+			navigateTo(PANELS.LIBRARY);
+			return;
+		}
+		if (item.Type === 'Audio') {
+			setPlayingItem(item);
+			setPlaybackOptions(null);
+			setIsResume(false);
+			navigateTo(PANELS.PLAYER);
+			return;
+		}
+		if (panelIndex === PANELS.DETAILS && selectedItem) {
+			detailsItemStackRef.current.push(selectedItem);
+			setSelectedItem(item);
+		} else {
+			detailsItemStackRef.current = [];
+			setSelectedItem(item);
+			navigateTo(PANELS.DETAILS);
+		}
+	}, [navigateTo, panelIndex, selectedItem, handlePlayChannel]);
+
+	// A song or a channel plays as soon as it's picked, so only the rest wait for their screen to start them.
+	const handlePlayFromMenu = useCallback((item) => {
+		handleSelectItem(item);
+		if (item.Type !== 'Audio' && !isLiveTvChannel(item)) setDetailsAutoPlay(true);
+	}, [handleSelectItem]);
+
+	const handleAutoPlayed = useCallback(() => setDetailsAutoPlay(false), []);
+
+	const handleViewPhoto = useCallback((item, siblings) => {
+		setPhotoViewerItem(item);
+		setPhotoViewerItems(siblings || []);
+	}, []);
+
+	const handleClosePhotoViewer = useCallback(() => {
+		setPhotoViewerItem(null);
+		setPhotoViewerItems([]);
+	}, []);
+
+	const handleCloseComicViewer = useCallback(() => {
+		setComicViewerItem(null);
+	}, []);
+
+	const handleSelectLibrary = useCallback(async (library) => {
+		if (isLiveTvLibrary(library)) {
+			if (settings.liveTvSkipGuide) {
+				let channels = null;
+				try {
+					channels = await api.getLiveTvChannels(0, 1);
+				} catch {
+					channels = null;
+				}
+				const firstChannel = channels?.Items?.[0];
+				if (firstChannel) {
+					setPlayingItem(firstChannel);
+					setPlaybackOptions(null);
+					setIsResume(false);
+					navigateTo(PANELS.PLAYER);
+					return;
+				}
+			}
+			navigateTo(PANELS.LIVETV);
+			return;
+		}
+		if (isGameLibrary(library.Id, library.CollectionType, library.Name)) {
+			// Every /Moonfin/Games call matches on the plugin's id, which is not always the
+			// user-view id this library arrived with.
+			setSelectedGameLibrary({...library, Id: resolveGameLibraryId(library)});
+			navigateTo(PANELS.GAMES);
+			return;
+		}
+		setSelectedLibrary(library);
+		setGenreFilter(null);
+		setStudioFilter(null);
+		navigateTo(PANELS.LIBRARY);
+	}, [api, navigateTo, settings.liveTvSkipGuide]);
+
+	const handleSelectStudio = useCallback((studioName) => {
+		if (!studioName) return;
+		setStudioFilter(studioName);
+		setGenreFilter(null);
+		setSelectedLibrary(null);
+		navigateTo(PANELS.LIBRARY);
+	}, [navigateTo]);
+
+	const handleSelectGameSystem = useCallback((gameLibrary, system) => {
+		setSelectedGameLibrary(gameLibrary);
+		setSelectedGameSystem(system);
+		navigateTo(PANELS.GAME_SYSTEM);
+	}, [navigateTo]);
+
+	const handleSelectGame = useCallback((gameLibrary, game) => {
+		setSelectedGameLibrary(gameLibrary);
+		setSelectedGame(game);
+		navigateTo(PANELS.GAME_DETAILS);
+	}, [navigateTo]);
+
+	const handlePlayGame = useCallback((gameLibrary, game, opts) => {
+		setSelectedGameLibrary(gameLibrary);
+		setSelectedGame(game);
+		setGameStartFresh(!!(opts && opts.fresh));
+		navigateTo(PANELS.GAME_PLAYER);
+	}, [navigateTo]);
+
+	const handlePlay = useCallback((item, resume, options) => {
+		if (item.MediaType === 'Book' && item.Path?.toLowerCase().endsWith('.cbz')) {
+			setComicViewerItem(item);
+			return;
+		}
+		if (isSyncPlayInGroup) {
+			syncPlaySetNewQueue([item.Id]);
+		} else if (settings.syncplayEnabled !== false && settings.syncplayAutoOpen) {
+			openSyncPlay();
+		}
+		window.AtlasFolders.play(item, options, (queueOptions) => {
+			setPlayingItem(item);
+			setPlaybackOptions(queueOptions || null);
+			setIsResume(!!resume);
+			navigateTo(PANELS.PLAYER);
+		});
+	}, [navigateTo, isSyncPlayInGroup, openSyncPlay, settings.syncplayAutoOpen, settings.syncplayEnabled, syncPlaySetNewQueue]);
+
+	const playSyncPlayItem = useCallback((item) => {
+		if (panelIndex === PANELS.PLAYER && playingItem?.Id === item.Id) return;
+		// Opened where the group is: a set started at the beginning is only
+		// seeked there by the server afterwards, which on a transcode means
+		// starting the stream twice while everyone waits.
+		const startPositionTicks = getSyncPlayPositionTicks();
+		setPlayingItem(item);
+		setPlaybackOptions(startPositionTicks > 0 ? {startPositionTicks} : null);
+		setIsResume(false);
+		navigateTo(PANELS.PLAYER);
+	}, [panelIndex, playingItem, navigateTo, getSyncPlayPositionTicks]);
+
+	// The group queued something, so the player has to take over. Reorders and
+	// repeat/shuffle toggles arrive the same way and only count when they
+	// change what is playing.
+	useEffect(() => {
+		const update = syncPlayQueueUpdate;
+		if (!update || update === handledSyncPlayQueueRef.current) return;
+		handledSyncPlayQueueRef.current = update;
+		if (!update.startsPlayback && playingItem?.Id === update.item.Id) return;
+		playSyncPlayItem(update.item);
+	}, [syncPlayQueueUpdate, playingItem, playSyncPlayItem]);
+
+	// The SyncPlay dialog sits above every panel and holds the remote focus, so
+	// it can't stay up over a player the group is driving: a member waiting in
+	// it when the group starts, or a group created from over the player through
+	// the auto-open flow, would otherwise only see the state badge change.
+	useEffect(() => {
+		if (syncPlayDialogOpen && isSyncPlayInGroup && panelIndex === PANELS.PLAYER) closeSyncPlay();
+	}, [syncPlayDialogOpen, isSyncPlayInGroup, panelIndex, closeSyncPlay]);
+
+	const handlePlayNext = useCallback((item) => {
+		setPlayingItem(item);
+		setPlaybackOptions(prev => {
+			if (prev?.audioPlaylist?.some(t => t.Id === item.Id)) {
+				return {audioPlaylist: prev.audioPlaylist};
+			}
+			if (prev?.videoQueue?.some(e => e.Id === item.Id)) {
+				return {videoQueue: prev.videoQueue};
+			}
+			if (prev?.liveTvChannels?.some(c => c.Id === item.Id)) {
+				return {liveTvChannels: prev.liveTvChannels};
+			}
+			return null;
+		});
+		setIsResume(false);
+	}, []);
+
+	const handlePlayerEnd = useCallback(() => {
+		setIsPlayerPaused(false);
+		setPlayingItem(null);
+		setPlaybackOptions(null);
+		setIsResume(false);
+		handleBack();
+		window.dispatchEvent(new CustomEvent('moonfin:browseRefresh'));
+	}, [handleBack]);
+
+	// The guide button on the live TV OSD always lands on the guide, not wherever
+	// playback was launched from. When the player was opened from the guide its
+	// history entry is dropped so back doesn't bounce through the guide twice.
+	const handlePlayerGuide = useCallback(() => {
+		setIsPlayerPaused(false);
+		setPlayingItem(null);
+		setPlaybackOptions(null);
+		setIsResume(false);
+		setPanelHistory(prev => (prev[prev.length - 1] === PANELS.LIVETV ? prev.slice(0, -1) : prev));
+		showPanel(PANELS.LIVETV);
+	}, [showPanel]);
+
+	const handleOpenSearch = useCallback(() => {
+		navigateTo(PANELS.SEARCH);
+	}, [navigateTo]);
+
+	const handleOpenSettings = useCallback(() => {
+		setSettingsInitialView(null);
+		setShowSettingsPanel(true);
+	}, []);
+
+	const handleOpenFriends = useCallback(() => {
+		setSettingsInitialView('friends');
+		setShowSettingsPanel(true);
+	}, []);
+
+	const handleCloseSettingsPanel = useCallback(() => {
+		setShowSettingsPanel(false);
+	}, []);
+
+	// Settings sits over everything, so picking something in it has to step out of the way first.
+	const handleSelectItemFromSettings = useCallback((item) => {
+		setShowSettingsPanel(false);
+		handleSelectItem(item);
+	}, [handleSelectItem]);
+
+	const handleOpenAccountModal = useCallback(() => {
+		setShowAccountModal(true);
+	}, []);
+
+	const handleCloseAccountModal = useCallback(() => {
+		setShowAccountModal(false);
+	}, []);
+
+	const handleOpenServerMessages = useCallback(() => {
+		setShowServerMessages(true);
+	}, []);
+
+	const handleCloseServerMessages = useCallback(() => {
+		setShowServerMessages(false);
+	}, []);
+
+	// Opens the messages window for messages the admin marked as open the window.
+	// Nothing else opens on its own, and playback is left alone until it ends.
+	useEffect(() => {
+		if (!isAuthenticated || panelIndex === PANELS.PLAYER || pendingPopups.length === 0) return;
+		markPopupsRead();
+		setShowServerMessages(true);
+	}, [isAuthenticated, panelIndex, pendingPopups, markPopupsRead]);
+
+	const handleCancelExitDialog = useCallback(() => {
+		setShowExitDialog(false);
+	}, []);
+
+	const handleCloseShuffleOverlay = useCallback(() => {
+		setShowShuffleOverlay(false);
+	}, []);
+
+	const handleRetryConnection = useCallback(() => {
+		revalidateSession(true);
+	}, [revalidateSession]);
+
+	const handleOpenFavorites = useCallback(() => {
+		navigateTo(PANELS.FAVORITES);
+	}, [navigateTo]);
+
+	const handleOpenGenres = useCallback(() => {
+		navigateTo(PANELS.GENRES);
+	}, [navigateTo]);
+
+	const handleOpenLiveTv = useCallback(() => {
+		navigateTo(PANELS.LIVETV);
+	}, [navigateTo]);
+
+	const handleSelectGenre = useCallback((genre, library) => {
+		setGenreFilter(genre.name);
+		setStudioFilter(null);
+		if (library) {
+			setSelectedLibrary(library);
+		} else if (genre._serverUrl) {
+			setSelectedLibrary({
+				Id: null,
+				Name: genre.name,
+				_serverUrl: genre._serverUrl,
+				_serverType: genre._serverType,
+				_serverAccessToken: genre._serverAccessToken,
+				_serverUserId: genre._serverUserId,
+				_serverName: genre._serverName,
+				_serverId: genre._serverId
+			});
+		} else {
+			setSelectedLibrary(null);
+		}
+		navigateTo(PANELS.LIBRARY);
+	}, [navigateTo]);
+
+	const handleSelectGenreFromBrowse = useCallback((genre) => {
+		if (!genre?.name) return;
+		setSelectedGenre(genre);
+		navigateTo(PANELS.GENRE_BROWSE);
+	}, [navigateTo]);
+
+	// Nouveau draws a person on the detail screen itself, so they open there rather than on the
+	// separate screen the other styles send them to.
+	const handleSelectPerson = useCallback((person) => {
+		if (settings.detailScreenStyle === 'v4') {
+			handleSelectItem(person);
+			return;
+		}
+		setSelectedPerson(person);
+		navigateTo(PANELS.PERSON);
+	}, [navigateTo, settings.detailScreenStyle, handleSelectItem]);
+
+	const handleSelectPersonFromPlayer = useCallback((person) => {
+		if (!person?.Id) return;
+		setIsPlayerPaused(false);
+		setPlayingItem(null);
+		setPlaybackOptions(null);
+		setIsResume(false);
+		if (settings.detailScreenStyle === 'v4') {
+			setSelectedItem(person);
+			navigateTo(PANELS.DETAILS, false);
+			return;
+		}
+		setSelectedPerson(person);
+		navigateTo(PANELS.PERSON, false);
+	}, [navigateTo, settings.detailScreenStyle]);
+
+	const handleOpenRecordings = useCallback(() => {
+		navigateTo(PANELS.RECORDINGS);
+	}, [navigateTo]);
+
+	const handlePlayRecording = useCallback((recording) => {
+		setPlayingItem(recording);
+		setPlaybackOptions(null);
+		setIsResume(false);
+		navigateTo(PANELS.PLAYER);
+	}, [navigateTo]);
+
+	const handleOpenSeerr = useCallback(() => {
+		navigateTo(PANELS.SEERR_DISCOVER);
+	}, [navigateTo]);
+
+	const handleHome = useCallback(() => {
+		setPanelHistory([]);
+		setSelectedItem(null);
+		setSelectedLibrary(null);
+		setSelectedPerson(null);
+		setSelectedGenre(null);
+		setGenreFilter(null);
+		setStudioFilter(null);
+		setSeerrBrowse(null);
+		setSeerrPerson(null);
+		window.dispatchEvent(new CustomEvent('moonfin:browseRefresh'));
+		setPanelIndex(PANELS.BROWSE);
+	}, []);
+
+	const showRemoteMessage = useCallback((text, header) => {
+		setRemoteMessage({key: Date.now(), title: header?.trim() || $L('Remote message'), body: text});
+	}, []);
+
+	// Another client sending something to play here. It starts where that client asked rather than
+	// at this one's resume point, and a run of items plays as a queue of the kind the first one is.
+	// Over a player already running, the new item takes its place the way the next one would.
+	const playFromRemote = useCallback(async (itemIds, options) => {
+		const loaded = await Promise.all(itemIds.map((id) => api.getItem(id).catch(() => null)));
+		const items = loaded.filter(Boolean);
+		if (!items.length) return;
+		const item = items[Math.min(Math.max(options.startIndex, 0), items.length - 1)];
+		const queue = items.filter((entry) => isAudioItem(entry) === isAudioItem(item));
+		const playOptions = {
+			startPositionTicks: options.startPositionTicks || 0,
+			audioStreamIndex: options.audioStreamIndex,
+			subtitleStreamIndex: options.subtitleStreamIndex,
+			mediaSourceId: options.mediaSourceId,
+			...(queue.length > 1 ? {[isAudioItem(item) ? 'audioPlaylist' : 'videoQueue']: queue} : {})
+		};
+		if (panelIndex !== PANELS.PLAYER) {
+			handlePlay(item, false, playOptions);
+			return;
+		}
+		await remoteControl.releasePlayer();
+		setPlayingItem(item);
+		setPlaybackOptions(playOptions);
+		setIsResume(false);
+	}, [api, panelIndex, handlePlay]);
+
+	// Queued from another client onto what's playing, music onto the playlist and video onto the
+	// queue, so what comes next follows the same order it would if it had been queued here.
+	const queueFromRemote = useCallback(async (itemIds, playNext) => {
+		if (!playingItem) return;
+		const loaded = await Promise.all(itemIds.map((id) => api.getItem(id).catch(() => null)));
+		const items = loaded.filter((entry) => entry && isAudioItem(entry) === isAudioItem(playingItem));
+		if (!items.length) return;
+		const key = isAudioItem(playingItem) ? 'audioPlaylist' : 'videoQueue';
+		setPlaybackOptions((prev) => {
+			const queue = prev?.[key]?.length ? prev[key] : [playingItem];
+			const at = queue.findIndex((entry) => entry.Id === playingItem.Id);
+			const next = playNext && at >= 0
+				? [...queue.slice(0, at + 1), ...items, ...queue.slice(at + 1)]
+				: [...queue, ...items];
+			return {...prev, [key]: next};
+		});
+	}, [api, playingItem]);
+
+	const remoteAppRef = useRef(null);
+	const [remoteSearch, setRemoteSearch] = useState(null);
+	const clearForRemote = () => {
+		dismissScreensaver();
+		closeTvKeyboard();
+		document.activeElement?.blur?.();
+		setShowSettingsPanel(false);
+	};
+	remoteAppRef.current = {
+		notifyInteraction: dismissScreensaver,
+		wakeScreensaver,
+		goToSearch: (search) => {
+			clearForRemote();
+			setRemoteSearch(search);
+			// The player has already returned to its previous panel. Do not
+			// put the now-closed player into Search's back history.
+			navigateTo(PANELS.SEARCH, panelIndex !== PANELS.PLAYER && panelIndex !== PANELS.SEARCH);
+		},
+		goHome: () => {
+			clearForRemote();
+			handleHome();
+		},
+		showMessage: showRemoteMessage,
+		playItems: playFromRemote,
+		queueItems: queueFromRemote
+	};
+
+	useEffect(() => remoteControl.setAppControls(remoteAppRef), []);
+
+	const [seerrRequestsTab, setSeerrRequestsTab] = useState('requests');
+
+	const handleOpenSeerrRequests = useCallback(() => {
+		setSeerrRequestsTab('requests');
+		navigateTo(PANELS.SEERR_REQUESTS);
+	}, [navigateTo]);
+
+	// One dispatcher for the Seerr shortcuts row, shared by home and discover.
+	const handleOpenSeerrShortcut = useCallback((shortcut) => {
+		switch (shortcut) {
+			case 'discover':
+				navigateTo(PANELS.SEERR_DISCOVER);
+				break;
+			case 'movies':
+				setSeerrBrowse({browseType: 'all', item: {name: $L('Movies')}, mediaType: 'movie'});
+				navigateTo(PANELS.SEERR_BROWSE);
+				break;
+			case 'series':
+				setSeerrBrowse({browseType: 'all', item: {name: $L('TV Shows')}, mediaType: 'tv'});
+				navigateTo(PANELS.SEERR_BROWSE);
+				break;
+			case 'requests':
+				setSeerrRequestsTab('requests');
+				navigateTo(PANELS.SEERR_REQUESTS);
+				break;
+			case 'issues':
+				setSeerrRequestsTab('issues');
+				navigateTo(PANELS.SEERR_REQUESTS);
+				break;
+		}
+	}, [navigateTo]);
+
+	const handleSwitchUser = useCallback(async () => {
+		await logout();
+		setPanelHistory([]);
+		setPanelIndex(PANELS.LOGIN);
+	}, [logout]);
+
+	const handleAddServer = useCallback(() => {
+		setPanelHistory([]);
+		setPanelIndex(PANELS.ADD_SERVER);
+	}, []);
+
+	const handleAddUser = useCallback(() => {
+		setPanelHistory([]);
+		setPanelIndex(PANELS.ADD_USER);
+	}, []);
+
+	const handleServerAdded = useCallback((result) => {
+		if (!result) {
+			setPanelHistory([]);
+			setPanelIndex(PANELS.SETTINGS);
+			return;
+		}
+		setPanelHistory([]);
+		setPanelIndex(PANELS.BROWSE);
+	}, []);
+
+	// A Seerr title opens on the same detail screen as everything else. One the library
+	// already holds opens as itself, since a stand-in has nothing to play, and only a
+	// title the library has never heard of keeps its Seerr identity.
+	const handleSelectSeerrItem = useCallback((item) => {
+		const normalized = normalizeSeerrSelection(item);
+		if (!normalized) {
+			return;
+		}
+		if (normalized.libraryId) {
+			handleSelectItem({
+				Id: normalized.libraryId,
+				Type: normalized.mediaType === 'tv' ? 'Series' : 'Movie'
+			});
+			return;
+		}
+		handleSelectItem(seerrDetailStub(normalized));
+	}, [handleSelectItem]);
+
+	const handleSelectSeerrGenre = useCallback((genreId, genreName, mediaType) => {
+		setSeerrBrowse({browseType: 'genre', item: {id: genreId, name: genreName}, mediaType});
+		navigateTo(PANELS.SEERR_BROWSE);
+	}, [navigateTo]);
+
+	const handleSelectSeerrStudio = useCallback((studioId, studioName) => {
+		setSeerrBrowse({browseType: 'studio', item: {id: studioId, name: studioName}, mediaType: 'movie'});
+		navigateTo(PANELS.SEERR_BROWSE);
+	}, [navigateTo]);
+
+	const handleSelectSeerrNetwork = useCallback((networkId, networkName) => {
+		setSeerrBrowse({browseType: 'network', item: {id: networkId, name: networkName}, mediaType: 'tv'});
+		navigateTo(PANELS.SEERR_BROWSE);
+	}, [navigateTo]);
+
+	const handleSelectSeerrKeyword = useCallback((keyword, mediaType) => {
+		setSeerrBrowse({browseType: 'keyword', item: keyword, mediaType});
+		navigateTo(PANELS.SEERR_BROWSE);
+	}, [navigateTo]);
+
+	const handleOpenSeerrCollection = useCallback((collectionId) => {
+		setSeerrCollection({collectionId});
+		navigateTo(PANELS.SEERR_COLLECTION);
+	}, [navigateTo]);
+
+	const handleSelectSeerrPerson = useCallback((personId, personName) => {
+		setSeerrPerson({id: personId, name: personName});
+		navigateTo(PANELS.SEERR_PERSON);
+	}, [navigateTo]);
+
+	// Everywhere the detail screen can send a viewer into the Seerr side of the app, bundled
+	// into one prop rather than six.
+	const seerrNav = useMemo(() => ({
+		onSelectItem: handleSelectSeerrItem,
+		onSelectPerson: handleSelectSeerrPerson,
+		onSelectKeyword: handleSelectSeerrKeyword,
+		onSelectGenre: handleSelectSeerrGenre,
+		onSelectNetwork: handleSelectSeerrNetwork,
+		onOpenCollection: handleOpenSeerrCollection
+	}), [handleSelectSeerrItem, handleSelectSeerrPerson, handleSelectSeerrKeyword, handleSelectSeerrGenre, handleSelectSeerrNetwork, handleOpenSeerrCollection]);
+
+	const handlePinInputChange = useCallback((e) => {
+		const nextValue = String(e.target.value || '').replace(/\D/g, '').slice(0, 4);
+		setPinCodeInput(nextValue);
+		if (pinCodeError) {
+			setPinCodeError('');
+		}
+	}, [pinCodeError]);
+
+	const handlePinSubmit = useCallback(() => {
+		const refocus = () => Spotlight.focus('[data-spotlight-id="app-pin-input"]');
+
+		// Asked before the guess is looked at, so waiting is the only way through and reopening
+		// the gate hands back no fresh guesses.
+		const waiting = lockoutRemaining(settings, SIGN_IN_PIN);
+		if (waiting > 0) {
+			setPinCodeInput('');
+			setPinCodeError(tooManyAttempts(waiting));
+			refocus();
+			return;
+		}
+
+		if (pinMatches(pinCodeInput, storedPin)) {
+			setIsPinUnlocked(true);
+			setPinCodeInput('');
+			setPinCodeError('');
+			// Store it as a hash from here on, and let a correct PIN clear the count. There is no
+			// way to reset a forgotten one on a television, so a lockout that outlived the right
+			// PIN would be a trap.
+			updateSettings({
+				pinCodeHash: settings.pinCodeHash || hashPin(pinCodeInput),
+				...clearedLockout(SIGN_IN_PIN)
+			});
+			return;
+		}
+
+		const {wait, changes} = registerFailedAttempt(settings, SIGN_IN_PIN);
+		updateSettings(changes);
+		setPinCodeInput('');
+		setPinCodeError(wait > 0 ? tooManyAttempts(wait) : $L('Incorrect PIN'));
+		refocus();
+	}, [pinCodeInput, storedPin, settings, updateSettings]);
+
+	const handlePinInputKeyDown = useCallback((e) => {
+		const code = e.keyCode || e.which;
+		if (code === 13 || e.key === 'Enter') {
+			e.preventDefault();
+			handlePinSubmit();
+		}
+	}, [handlePinSubmit]);
+
+	// Stored settings have to be in before anything renders, because
+	// pinCodeProtection reads as off until then and a protected profile would
+	// come up unlocked.
+	if (isLoading || !authChecked || !settingsLoaded) {
+		return (
+			<div className={css.loading}>
+				<LoadingSpinner />
+			</div>
+		);
+	}
+
+	if (isPinGateActive) {
+		return (
+			<div className={css.app} {...props}>
+				<div className={css.pinGate}>
+					<div className={css.pinCard}>
+						<h2 className={css.pinTitle}>{$L('Enter PIN')}</h2>
+						<p className={css.pinSubtitle}>{$L('This profile is protected by a 4-digit PIN.')}</p>
+						<SpottableInput
+							className={css.pinInput}
+							type='password'
+							purpose='numeric'
+							value={pinCodeInput}
+							onChange={handlePinInputChange}
+							onKeyDown={handlePinInputKeyDown}
+							maxLength={4}
+							placeholder={$L('4 digits')}
+							spotlightId='app-pin-input'
+						/>
+						{pinCodeError && <div className={css.pinError}>{pinCodeError}</div>}
+						<div className={css.pinActions}>
+							<SpottableButton
+								className={css.pinButton}
+								onClick={handlePinSubmit}
+								spotlightId='app-pin-submit'
+							>
+								{$L('Unlock')}
+							</SpottableButton>
+						</div>
+					</div>
+				</div>
+				<TVKeyboard />
+			</div>
+		);
+	}
+
+	// The wizard owns the whole screen the way the PIN gate does, so nothing
+	// behind it can take focus until it finishes.
+	if (setupWizardActive) {
+		return (
+			<div className={css.app} {...props}>
+				<Suspense fallback={<div className={css.loading}><LoadingSpinner /></div>}>
+					<SetupWizard onDone={handleSetupWizardDone} backHandlerRef={setupWizardBackRef} />
+				</Suspense>
+			</div>
+		);
+	}
+
+	const getActiveView = () => {
+		switch (panelIndex) {
+			case PANELS.BROWSE: return 'home';
+			case PANELS.SEARCH: return 'search';
+			case PANELS.SETTINGS: return 'settings';
+			case PANELS.FAVORITES: return 'favorites';
+			case PANELS.GENRES: return 'genres';
+			case PANELS.SEERR_DISCOVER:
+			case PANELS.SEERR_REQUESTS:
+			case PANELS.SEERR_BROWSE:
+			case PANELS.SEERR_PERSON:
+				return 'discover';
+			case PANELS.LIBRARY: return selectedLibrary?.Id || '';
+			default: return '';
+		}
+	};
+
+	const hasLiveTv = libraries.some(isLiveTvLibrary);
+
+	const showNavBar = panelIndex !== PANELS.LOGIN &&
+		panelIndex !== PANELS.PLAYER &&
+		panelIndex !== PANELS.GAME_PLAYER &&
+		panelIndex !== PANELS.GAMES &&
+		panelIndex !== PANELS.GAME_SYSTEM &&
+		panelIndex !== PANELS.GAME_DETAILS &&
+		panelIndex !== PANELS.LIBRARY &&
+		panelIndex !== PANELS.LIVETV &&
+		panelIndex !== PANELS.RECORDINGS &&
+		panelIndex !== PANELS.ADD_SERVER &&
+		panelIndex !== PANELS.ADD_USER &&
+		panelIndex !== PANELS.GENRES &&
+		panelIndex !== PANELS.FAVORITES &&
+		!(panelIndex === PANELS.DETAILS && ['Playlist', 'MusicAlbum', 'MusicArtist'].includes(selectedItem?.Type));
+
+	return (
+		<div className={css.app} {...props}>
+			{showNavBar && settings.navbarPosition === 'left' ? (
+				<Sidebar
+					libraries={libraries}
+					hasLiveTv={hasLiveTv}
+					onHome={handleHome}
+					onSearch={handleOpenSearch}
+					onShuffle={handleShuffle}
+					onGenres={handleOpenGenres}
+					onFavorites={handleOpenFavorites}
+					onLiveTv={handleOpenLiveTv}
+					onDiscover={handleOpenSeerr}
+					onSyncPlay={settings.syncplayEnabled !== false ? openSyncPlay : undefined}
+					onSettings={handleOpenSettings}
+					onSelectLibrary={handleSelectLibrary}
+					onUserMenu={handleOpenAccountModal}
+					onMessages={handleOpenServerMessages}
+					onFriends={handleOpenFriends}
+				/>
+			) : showNavBar ? (
+				<NavBar
+					activeView={getActiveView()}
+					libraries={libraries}
+					hasLiveTv={hasLiveTv}
+					onHome={handleHome}
+					onSearch={handleOpenSearch}
+					onShuffle={handleShuffle}
+					onGenres={handleOpenGenres}
+					onFavorites={handleOpenFavorites}
+					onLiveTv={handleOpenLiveTv}
+					onDiscover={handleOpenSeerr}
+					onSyncPlay={settings.syncplayEnabled !== false ? openSyncPlay : undefined}
+					onSettings={handleOpenSettings}
+					onSelectLibrary={handleSelectLibrary}
+					onUserMenu={handleOpenAccountModal}
+					onMessages={handleOpenServerMessages}
+					onFriends={handleOpenFriends}
+				/>
+			) : null}
+			<ItemMenuProvider onPlay={handlePlayFromMenu} onOpenItem={handleSelectItem} backRef={itemMenuBackRef}>
+				<Suspense fallback={<PanelLoader />}>
+					<Panels index={panelIndex} noCloseButton noAnimation>
+						<Panel>
+							<Login onLoggedIn={handleLoggedIn} backHandlerRef={backHandlerRef} />
+						</Panel>
+						<Panel>
+							<Browse
+								onSelectItem={handleSelectItem}
+								onSelectLibrary={handleSelectLibrary}
+								onOpenRecordings={handleOpenRecordings}
+								onPlayRecording={handlePlayRecording}
+								onSelectGenre={handleSelectGenreFromBrowse}
+								onSelectSeerrItem={handleSelectSeerrItem}
+								onSelectSeerrGenre={handleSelectSeerrGenre}
+								onSelectSeerrStudio={handleSelectSeerrStudio}
+								onSelectSeerrNetwork={handleSelectSeerrNetwork}
+								onOpenSeerrShortcut={handleOpenSeerrShortcut}
+								isVisible={panelIndex === PANELS.BROWSE && !showSettingsPanel}
+								backHandlerRef={backHandlerRef}
+								onFocusItemThemeMusic={themeMusic.playThemeMusicDelayed}
+								onBlurItemThemeMusic={themeMusic.cancelDelayed}
+								onLeaveThemeMusic={themeMusic.stopThemeMusic}
+							/>
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.DETAILS && (
+								<Details
+									itemId={selectedItem?.Id}
+									initialItem={selectedItem}
+									onPlay={handlePlay}
+									onSelectItem={handleSelectItem}
+									onSelectPerson={handleSelectPerson}
+									onSelectStudio={handleSelectStudio}
+									onItemDeleted={handleBack}
+									autoPlay={detailsAutoPlay}
+									onAutoPlayed={handleAutoPlayed}
+									seerrNav={seerrNav}
+									backHandlerRef={backHandlerRef}
+							/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.LIBRARY && (
+								<Library
+								library={selectedLibrary}
+								genreFilter={genreFilter}
+								studioFilter={studioFilter}
+								onSelectItem={handleSelectItem}
+								onViewPhoto={handleViewPhoto}
+								onHome={handleHome}
+									backHandlerRef={backHandlerRef}
+							/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.SEARCH && (
+								<Search remoteSearch={remoteSearch} onSelectItem={handleSelectItem} onSelectSeerrItem={handleSelectSeerrItem} onSelectPerson={handleSelectPerson} onSelectGame={handleSelectGame} onPlayChannel={handlePlayChannel} />
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.SETTINGS && (
+								<Settings
+									onBack={handleBack}
+									onLibrariesChanged={fetchLibraries}
+									onRunSetupWizard={handleRunSetupWizard}
+									onSelectItem={handleSelectItemFromSettings}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.PLAYER && playingItem && (
+								<Player
+									item={playingItem}
+									resume={isResume}
+									initialMediaSourceId={playbackOptions?.mediaSourceId}
+									initialAudioIndex={playbackOptions?.audioStreamIndex}
+									initialSubtitleIndex={playbackOptions?.subtitleStreamIndex}
+									initialStartPositionTicks={playbackOptions?.startPositionTicks}
+									initialQuality={playbackOptions?.forceBitrate}
+									forceTranscode={playbackOptions?.forceTranscode}
+									audioPlaylist={playbackOptions?.audioPlaylist}
+									videoQueue={playbackOptions?.videoQueue}
+									liveTvChannels={playbackOptions?.liveTvChannels}
+									onEnded={handlePlayerEnd}
+									onBack={handlePlayerEnd}
+									onGuide={handlePlayerGuide}
+									onPlayNext={handlePlayNext}
+									onSelectPerson={handleSelectPersonFromPlayer}
+									onPausedChange={setIsPlayerPaused}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.FAVORITES && (
+								<Favorites onSelectItem={handleSelectItem} onSelectPerson={handleSelectPerson} onHome={handleHome} backHandlerRef={backHandlerRef} />
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.GENRES && (
+								<Genres onSelectGenre={handleSelectGenre} onHome={handleHome} backHandlerRef={backHandlerRef} />
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.PERSON && (
+								<Person personId={selectedPerson?.Id} onSelectItem={handleSelectItem} onSelectSeerrItem={handleSelectSeerrItem} onSelectSeerrPerson={handleSelectSeerrPerson} />
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.LIVETV && (
+								<LiveTV onPlayChannel={handlePlayChannel} onRecordings={handleOpenRecordings} backHandlerRef={backHandlerRef} />
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.SEERR_DISCOVER && (
+								<SeerrDiscover
+									backHandlerRef={backHandlerRef}
+									onSelectItem={handleSelectSeerrItem}
+									onSelectGenre={handleSelectSeerrGenre}
+									onSelectStudio={handleSelectSeerrStudio}
+									onSelectNetwork={handleSelectSeerrNetwork}
+									onOpenRequests={handleOpenSeerrRequests}
+									onOpenShortcut={handleOpenSeerrShortcut}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.SEERR_REQUESTS && (
+								<SeerrRequests
+									onSelectItem={handleSelectSeerrItem}
+									onClose={handleBack}
+									initialTab={seerrRequestsTab}
+									backHandlerRef={backHandlerRef}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.GENRE_BROWSE && (
+								<GenreBrowse
+									genre={selectedGenre}
+									onSelectItem={handleSelectItem}
+								backHandlerRef={backHandlerRef}
+							/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.RECORDINGS && (
+								<Recordings onPlayRecording={handlePlayRecording} onBack={handleBack} backHandlerRef={backHandlerRef} />
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.SEERR_BROWSE && (
+								<SeerrBrowse
+									browseType={seerrBrowse?.browseType}
+									item={seerrBrowse?.item}
+									mediaType={seerrBrowse?.mediaType}
+									onSelectItem={handleSelectSeerrItem}
+								backHandlerRef={backHandlerRef}
+							/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.SEERR_PERSON && (
+								<SeerrPerson
+									personId={seerrPerson?.id}
+									personName={seerrPerson?.name}
+									onSelectItem={handleSelectSeerrItem}
+									onBack={handleBack}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.ADD_SERVER && (
+								<Login
+									onLoggedIn={handleLoggedIn}
+									onServerAdded={handleServerAdded}
+									backHandlerRef={backHandlerRef}
+									isAddingServer
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.ADD_USER && (
+								<Login
+									onLoggedIn={handleLoggedIn}
+									onServerAdded={handleServerAdded}
+									backHandlerRef={backHandlerRef}
+									isAddingUser
+									currentServerUrl={serverUrl}
+									currentServerName={serverName}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.GAMES && (
+								<Games
+									library={selectedGameLibrary}
+									onSelectSystem={handleSelectGameSystem}
+									onHome={handleHome}
+									backHandlerRef={backHandlerRef}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.GAME_DETAILS && (
+								<GameDetails
+									library={selectedGameLibrary}
+									gameId={selectedGame?.id}
+									initialGame={selectedGame}
+									onPlay={handlePlayGame}
+									onSelectGame={handleSelectGame}
+									backHandlerRef={backHandlerRef}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.GAME_PLAYER && selectedGame && (
+								<GamePlayer
+									library={selectedGameLibrary}
+									game={selectedGame}
+									startFresh={gameStartFresh}
+									onBack={handleBack}
+									backHandlerRef={backHandlerRef}
+								/>
+							)}
+						</Panel>
+						{/* Panels renders only children[panelIndex], so every Panel's position
+						    here has to match its PANELS value and a new one goes on the end. */}
+						<Panel>
+							{panelIndex === PANELS.SEERR_COLLECTION && (
+								<SeerrCollection
+									collectionId={seerrCollection?.collectionId}
+									onSelectItem={handleSelectSeerrItem}
+									backHandlerRef={backHandlerRef}
+								/>
+							)}
+						</Panel>
+						<Panel>
+							{panelIndex === PANELS.GAME_SYSTEM && (
+								<GameSystem
+									library={selectedGameLibrary}
+									system={selectedGameSystem}
+									onSelectGame={handleSelectGame}
+									onBack={handleBack}
+									backHandlerRef={backHandlerRef}
+								/>
+							)}
+						</Panel>
+					</Panels>
+				</Suspense>
+			</ItemMenuProvider>
+			<AccountModal
+				open={showAccountModal}
+				onClose={handleCloseAccountModal}
+				onLogout={handleSwitchUser}
+				onAddServer={handleAddServer}
+				onAddUser={handleAddUser}
+			/>
+			<ExitDialog
+				open={showExitDialog}
+				onCancel={handleCancelExitDialog}
+				onExit={performAppCleanup}
+			/>
+			<SyncPlayDialog
+				open={syncPlayDialogOpen}
+				onClose={closeSyncPlay}
+				playingItemId={panelIndex === PANELS.PLAYER ? playingItem?.Id : null}
+				onWatch={playSyncPlayItem}
+			/>
+			<ShuffleOverlay
+				open={showShuffleOverlay}
+				onClose={handleCloseShuffleOverlay}
+				onSelectItem={handleSelectItem}
+				api={api}
+				unifiedMode={unifiedMode}
+				contentType={settings.shuffleContentType || 'both'}
+				serverUrl={serverUrl}
+				accessToken={accessToken}
+				originSpotlightId={shuffleOriginSpotlightId}
+			/>
+			<UpdateNotification
+				updateInfo={updateInfo}
+				formattedNotes={formattedNotes}
+				onDismiss={dismissUpdate}
+			/>
+			<SeerrNotificationToast
+				notification={streamNotification}
+				onDismiss={dismissStreamNotification}
+			/>
+			<SeerrNotificationToast
+				notification={remoteMessage}
+				onDismiss={clearRemoteMessage}
+			/>
+			<SeerrNotificationToast
+				notification={badgeToasts[0] || null}
+				onDismiss={showNextBadgeToast}
+			/>
+			<SeerrNotificationToast
+				notification={chatToast}
+				onDismiss={shownIncomingMessage}
+			/>
+			<ServerMessagesDialog
+				open={showServerMessages}
+				onClose={handleCloseServerMessages}
+				backHandlerRef={serverMessagesBackRef}
+			/>
+			{photoViewerItem && (
+				<PhotoViewer
+					item={photoViewerItem}
+					items={photoViewerItems}
+					serverUrl={serverUrl}
+					onClose={handleClosePhotoViewer}
+				/>
+			)}
+			{comicViewerItem && (
+				<ComicViewer
+					item={comicViewerItem}
+					serverUrl={serverUrl}
+					accessToken={accessToken}
+					onClose={handleCloseComicViewer}
+				/>
+			)}
+			<Screensaver
+				visible={showScreensaver}
+				backdrop={settings.screensaverBackdrop || 'library'}
+				component={settings.screensaverComponent || 'none'}
+				movement={settings.screensaverMovement || 'moderate'}
+				position={settings.screensaverPosition || 'middle'}
+				size={settings.screensaverSize || 'medium'}
+				contentType={settings.screensaverContentType || 'both'}
+				libraryIds={settings.screensaverLibraryIds}
+				collectionIds={settings.screensaverCollectionIds}
+				excludedGenres={settings.screensaverExcludedGenres}
+				dimmingLevel={settings.screensaverDimmingLevel}
+				clockDisplay={settings.clockDisplay}
+				timeOffsetHours={settings.timeOffsetHours}
+				maxRating={settings.screensaverAgeFilter ? settings.screensaverMaxRating : null}
+				onDismiss={dismissScreensaver}
+				serverUrl={serverUrl}
+			/>
+			{/* Home only, and unmounted under the screensaver and the full screen overlays so it
+			never keeps animating behind them. */}
+			{panelIndex === PANELS.BROWSE && !showScreensaver && !showShuffleOverlay &&
+				!photoViewerItem && !comicViewerItem && (
+				<SeasonalTheme theme={settings.seasonalTheme} density={settings.seasonalDensity} />
+			)}
+			<NoConnection />
+			<DebugOverlay />
+			{connectionState !== 'connected' && isAuthenticated && (
+				<div className={css.connectionBanner}>
+					<span>{connectionState === 'reconnecting' ? $L('Reconnecting to server...') : $L('Lost connection to server')}</span>
+					{connectionState === 'disconnected' && (
+						<button className={css.retryButton} onClick={handleRetryConnection}>{$L('Retry')}</button>
+					)}
+				</div>
+			)}
+			{showSettingsPanel && (
+				<SettingsPanel
+					initialView={settingsInitialView}
+					onClose={handleCloseSettingsPanel}
+					onLibrariesChanged={fetchLibraries}
+					onRunSetupWizard={handleRunSetupWizard}
+					onSelectItem={handleSelectItemFromSettings}
+				/>
+			)}
+			<TVKeyboard />
+		</div>
+	);
+};
+
+let storedLocale = 'en-US';
+try {
+	const bootLocale = localStorage.getItem('moonfin_uiLanguage');
+	if (bootLocale) {
+		storedLocale = bootLocale;
+	} else {
+		const stored = JSON.parse(localStorage.getItem('moonfin_settings') || '{}');
+		storedLocale = stored.uiLanguage || 'en-US';
+	}
+} catch (e) { /* use default */ }
+
+// Pre-populate ilib.data with the locale strings so loadData() finds them cached
+// and skips synchronous XHR, which fails silently on Tizen. Only the locale the
+// app boots into is fetched, since a language change reloads the app and bundling
+// every locale eagerly would add megabytes to main.js. ilib keys use underscores
+// and path segments, so pt-BR becomes strings_pt_BR.
+const localeContext = require.context('../../resources', true, /^\.[\/][^/]+\/strings\.json$/, 'lazy');
+
+// ilib merges root, then language, then language-region, so a regional locale
+// needs its base language loaded alongside it for anything the region file
+// leaves out.
+const localeChain = (locale) => {
+	const [language, region] = String(locale || '').split('-');
+	if (!language) return [];
+	return region ? [language, language + '-' + region] : [language];
+};
+
+export const localeStringsReady = Promise.all(
+	localeChain(storedLocale).map((dir) => {
+		const key = './' + dir + '/strings.json';
+		if (localeContext.keys().indexOf(key) === -1) return null;
+		return localeContext(key).then((strings) => {
+			ilib.data['strings_' + dir.replace('-', '_')] = strings.default || strings;
+		}, () => {
+			// A missing chunk just means that locale falls back to English.
+		});
+	})
+);
+
+const AppBase = (props) => (
+	<SettingsProvider>
+		<AuthProvider>
+			<SeerrProvider>
+				<AchievementsProvider>
+					<ServerMessagesProvider>
+						<SyncPlayProvider>
+							<AppContent {...props} />
+						</SyncPlayProvider>
+					</ServerMessagesProvider>
+				</AchievementsProvider>
+			</SeerrProvider>
+		</AuthProvider>
+	</SettingsProvider>
+);
+
+const AppThemed = ThemeDecorator(AppBase);
+const App = (props) => <AppThemed {...props} locale={storedLocale} />;
+export default App;

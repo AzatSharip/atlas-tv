@@ -1,0 +1,776 @@
+import {useState, useEffect, useCallback, useRef, useMemo, memo} from 'react';
+import Spottable from '@enact/spotlight/Spottable';
+import SpotlightContainerDecorator from '@enact/spotlight/SpotlightContainerDecorator';
+import Spotlight from '@enact/spotlight';
+import $L from '@enact/i18n/$L';
+import {useSeerr} from '../../context/SeerrContext';
+import {pointerHover} from '../../utils/focusScroll';
+import {useSettings} from '../../context/SettingsContext';
+import seerrApi from '../../services/seerrApi';
+import {seerrGenreBackdrop} from '../../utils/seerrGenreArt';
+import LoadingSpinner from '../../components/LoadingSpinner';
+import {KEYS} from '../../utils/keys';
+import hydrateRequestMediaItems from '../../utils/seerrHydration';
+import {STREAMING_NETWORKS, MOVIE_STUDIOS, SEERR_SHORTCUTS, pickShortcutBackdrops} from '../../utils/seerrHomeRows';
+import {libraryIdOf} from '../../utils/seerrTarget';
+import {isScrolledAway} from '../../utils/quickReturn';
+import {focusedCardIndex, cardToRestore} from '../../utils/rowFocusMemory';
+
+import css from './SeerrDiscover.module.less';
+
+const SpottableDiv = Spottable('div');
+const RowContainer = SpotlightContainerDecorator({
+	enterTo: 'last-focused',
+	restrict: 'self-first'
+}, 'div');
+
+const ITEMS_PER_PAGE = 9;
+
+let _rowConfigs;
+const getRowConfigs = () => (_rowConfigs ??= [
+	{id: 'shortcuts', title: $L('Seerr Browse'), type: 'shortcut'},
+	{id: 'myRequests', title: $L('Recent Requests'), type: 'request'},
+	{id: 'trending', title: $L('Trending Now'), type: 'media', fetchFn: 'trending'},
+	{id: 'popularMovies', title: $L('Popular Movies'), type: 'media', fetchFn: 'trendingMovies'},
+	{id: 'popularTv', title: $L('Popular TV Shows'), type: 'media', fetchFn: 'trendingTv'},
+	{id: 'genreMovies', title: $L('Browse Movies by Genre'), type: 'genre', mediaType: 'movie'},
+	{id: 'genreTv', title: $L('Browse TV by Genre'), type: 'genre', mediaType: 'tv'},
+	{id: 'studios', title: $L('Browse by Studio'), type: 'studio'},
+	{id: 'networks', title: $L('Browse by Network'), type: 'network'},
+	{id: 'upcomingMovies', title: $L('Upcoming Movies'), type: 'media', fetchFn: 'upcomingMovies'},
+	{id: 'upcomingTv', title: $L('Upcoming TV Shows'), type: 'media', fetchFn: 'upcomingTv'}
+]);
+
+// Discover stays off this copy of the row, since this screen is the
+// destination it would point at.
+const getShortcuts = (trendingResults = []) => {
+	const shortcuts = SEERR_SHORTCUTS.filter((shortcut) => shortcut.key !== 'discover');
+	const shuffled = trendingResults.slice().sort(() => Math.random() - 0.5);
+	const backdrops = pickShortcutBackdrops(shortcuts, shuffled);
+	return shortcuts.map((shortcut) => ({
+		key: shortcut.key,
+		name: shortcut.name(),
+		backdrop: backdrops[shortcut.key]
+	}));
+};
+
+let lastFocusedRowIndex = null;
+let lastFocusedCardIndex = -1;
+
+// Memoized card components for performance
+const MediaCard = memo(function MediaCard({item, mediaType, onSelect, onFocus}) {
+	const posterUrl = seerrApi.getImageUrl(item.poster_path || item.posterPath, 'w342');
+	const title = item.title || item.name;
+	const status = item.mediaInfo?.status;
+	const itemMediaType = item.media_type || item.mediaType || mediaType;
+
+	const handleClick = useCallback(() => {
+		onSelect?.(item, mediaType);
+	}, [item, mediaType, onSelect]);
+
+	const handleFocus = useCallback(() => {
+		onFocus?.(item);
+	}, [item, onFocus]);
+
+	return (
+		<SpottableDiv className={css.mediaCard} onClick={handleClick} onFocus={handleFocus}>
+			<div className={css.posterContainer}>
+				{posterUrl ? (
+					<img className={css.poster} src={posterUrl} alt={title} loading="lazy" />
+				) : (
+					<div className={css.noPoster}>{title?.[0]}</div>
+				)}
+				{itemMediaType && (
+					<div className={`${css.mediaTypeBadge} ${itemMediaType === 'movie' ? css.movieBadge : css.seriesBadge}`}>
+						{itemMediaType === 'movie' ? $L('Movie') : $L('Series')}
+					</div>
+				)}
+				{status && [2, 3, 4, 5].includes(status) && (
+					<div className={`${css.availabilityBadge} ${css[`availability${status}`]}`} />
+				)}
+			</div>
+		</SpottableDiv>
+	);
+});
+
+const ShortcutCard = memo(function ShortcutCard({shortcut, onSelect}) {
+	const backdropUrl = shortcut.backdrop ? seerrApi.getImageUrl(shortcut.backdrop, 'w780') : '';
+
+	const handleClick = useCallback(() => {
+		onSelect?.(shortcut.key);
+	}, [shortcut.key, onSelect]);
+
+	return (
+		<SpottableDiv className={css.genreCard} onClick={handleClick}>
+			{backdropUrl && <img className={css.genreBackdrop} src={backdropUrl} alt={shortcut.name} loading="lazy" />}
+			<div className={css.genreOverlay}>
+				<span className={css.genreTitle}>{shortcut.name}</span>
+			</div>
+		</SpottableDiv>
+	);
+});
+
+const GenreCard = memo(function GenreCard({genre, mediaType, onSelect, onFocus}) {
+	const art = seerrGenreBackdrop(genre.id, genre.backdrops);
+	const backdropUrl = art ? seerrApi.getImageUrl(art.path, art.size) : '';
+
+	const handleClick = useCallback(() => {
+		onSelect?.(genre.id, genre.name, mediaType);
+	}, [genre.id, genre.name, mediaType, onSelect]);
+
+	const handleFocus = useCallback(() => {
+		onFocus?.({backdrops: genre.backdrops});
+	}, [genre.backdrops, onFocus]);
+
+	return (
+		<SpottableDiv className={css.genreCard} onClick={handleClick} onFocus={handleFocus}>
+			{backdropUrl && <img className={css.genreBackdrop} src={backdropUrl} alt={genre.name} loading="lazy" />}
+			<div className={css.genreOverlayFlat}>
+				<span className={css.genreTitleSeerr}>{genre.name}</span>
+			</div>
+		</SpottableDiv>
+	);
+});
+
+const NetworkCard = memo(function NetworkCard({network, onSelect}) {
+	const logoUrl = seerrApi.getImageUrl('/' + network.logo, 'w185');
+
+	const handleClick = useCallback(() => {
+		onSelect?.(network.id, network.name);
+	}, [network.id, network.name, onSelect]);
+
+	return (
+		<SpottableDiv className={css.networkCard} onClick={handleClick}>
+			<div className={css.networkLogoContainer}>
+				<img className={css.networkLogo} src={logoUrl} alt={network.name} loading="lazy" />
+			</div>
+		</SpottableDiv>
+	);
+});
+
+const StudioCard = memo(function StudioCard({studio, onSelect}) {
+	const logoUrl = seerrApi.getImageUrl('/' + studio.logo, 'w185');
+
+	const handleClick = useCallback(() => {
+		onSelect?.(studio.id, studio.name);
+	}, [studio.id, studio.name, onSelect]);
+
+	return (
+		<SpottableDiv className={css.networkCard} onClick={handleClick}>
+			<div className={css.networkLogoContainer}>
+				<img className={css.networkLogo} src={logoUrl} alt={studio.name} loading="lazy" />
+			</div>
+		</SpottableDiv>
+	);
+});
+
+// Request card component - shows user's requests with status
+const RequestCard = memo(function RequestCard({request, onSelect, onFocus}) {
+	const media = request.media;
+	const posterUrl = media?.posterPath ? seerrApi.getImageUrl(media.posterPath, 'w342') : null;
+	const title = media?.title || media?.name || 'Unknown';
+	const requestStatus = request.status;
+	const mediaStatus = media?.status;
+	const mediaType = request.type;
+
+	// Request status wins only for declined and failed.
+	const getStatusInfo = () => {
+		if (requestStatus === 3) return {text: $L('Declined'), cls: css.requestStatusDeclined};
+		if (requestStatus === 4) return {text: $L('Failed'), cls: css.requestStatusDeclined};
+		if (requestStatus === 5) return {text: $L('Available'), cls: css.requestStatusAvailable};
+		if (mediaStatus === 5) return {text: $L('Available'), cls: css.requestStatusAvailable};
+		if (mediaStatus === 4) return {text: $L('Partial'), cls: css.requestStatusAvailable};
+		if (mediaStatus === 3) return {text: $L('Requested'), cls: css.requestStatusDownloading};
+		if (requestStatus === 2) return {text: $L('Approved'), cls: css.requestStatusApproved};
+		return {text: $L('Unknown'), cls: css.requestStatusPending};
+	};
+
+	const {text: statusText, cls: statusClass} = requestStatus !== 1 ? getStatusInfo() : {};
+
+	const handleClick = useCallback(() => {
+		const item = {
+			id: media?.tmdbId,
+			tmdbId: media?.tmdbId,
+			title: media?.title,
+			name: media?.name,
+			poster_path: media?.posterPath,
+			backdrop_path: media?.backdropPath,
+			overview: media?.overview,
+			media_type: mediaType,
+			mediaType: mediaType,
+			_seerrLibraryId: libraryIdOf(media)
+		};
+		onSelect?.(item, mediaType);
+	}, [media, mediaType, onSelect]);
+
+	const handleFocus = useCallback(() => {
+		onFocus?.({
+			backdrop_path: media?.backdropPath,
+			title: media?.title || media?.name,
+			overview: media?.overview
+		});
+	}, [media, onFocus]);
+
+	return (
+		<SpottableDiv className={css.requestCard} onClick={handleClick} onFocus={handleFocus}>
+			<div className={css.requestPosterContainer}>
+				{posterUrl ? (
+					<img className={css.requestPoster} src={posterUrl} alt={title} loading="lazy" />
+				) : (
+					<div className={css.noPoster}>{title?.[0]}</div>
+				)}
+				{mediaType && (
+					<div className={`${css.mediaTypeBadge} ${mediaType === 'movie' ? css.movieBadge : css.seriesBadge}`}>
+						{mediaType === 'movie' ? $L('Movie') : $L('Series')}
+					</div>
+				)}
+				{requestStatus === 1 ? (
+					<div className={`${css.availabilityBadge} ${css.availability2}`} />
+				) : (
+					<div className={`${css.requestStatusBadge} ${statusClass}`}>
+						{statusText}
+					</div>
+				)}
+			</div>
+		</SpottableDiv>
+	);
+});
+
+// Memoized row component
+const DiscoverRow = memo(function DiscoverRow({
+	config,
+	items,
+	rowIndex,
+	isLoading,
+	onSelectItem,
+	onSelectGenre,
+	onSelectNetwork,
+	onSelectStudio,
+	onOpenShortcut,
+	onFocusItem,
+	onNavigateUp,
+	onNavigateDown,
+	onLoadMore,
+	onRowFocus
+}) {
+	const scrollerRef = useRef(null);
+
+	const handleKeyDown = useCallback((e) => {
+		if (e.keyCode === KEYS.UP) {
+			e.preventDefault();
+			e.stopPropagation();
+			onNavigateUp?.(rowIndex);
+		} else if (e.keyCode === KEYS.DOWN) {
+			e.preventDefault();
+			e.stopPropagation();
+			onNavigateDown?.(rowIndex);
+		} else if (e.keyCode === KEYS.LEFT) {
+			const firstSpottable = e.currentTarget.querySelector('.spottable');
+			if (firstSpottable && firstSpottable.contains(document.activeElement)) {
+				e.preventDefault();
+				e.stopPropagation();
+				Spotlight.focus('navbar');
+			}
+		}
+	}, [rowIndex, onNavigateUp, onNavigateDown]);
+
+	const handleFocus = useCallback((e) => {
+		onRowFocus?.(rowIndex);
+
+		const card = e.target.closest(`.${css.mediaCard}, .${css.genreCard}, .${css.networkCard}, .${css.requestCard}`);
+		const scroller = scrollerRef.current;
+		const hover = pointerHover();
+		if (card && scroller) {
+			if (!hover) {
+				const cardRect = card.getBoundingClientRect();
+				const scrollerRect = scroller.getBoundingClientRect();
+
+				if (cardRect.left < scrollerRect.left) {
+					scroller.scrollLeft -= (scrollerRect.left - cardRect.left + 50);
+				} else if (cardRect.right > scrollerRect.right) {
+					scroller.scrollLeft += (cardRect.right - scrollerRect.right + 50);
+				}
+			}
+
+			const cards = scroller.querySelectorAll(`.${css.mediaCard}, .${css.genreCard}, .${css.networkCard}, .${css.requestCard}`);
+			const cardIndex = Array.from(cards).indexOf(card);
+			if (cardIndex >= cards.length - 3) {
+				onLoadMore?.(config.id);
+			}
+		}
+
+		const row = hover ? null : e.target.closest(`.${css.contentRow}`);
+		if (row) {
+			row.scrollIntoView({behavior: 'smooth', block: 'center'});
+		}
+	}, [config.id, onLoadMore, rowIndex, onRowFocus]);
+
+	const renderCards = useMemo(() => {
+		switch (config.type) {
+			case 'shortcut':
+				return items.map(item => (
+					<ShortcutCard key={item.key} shortcut={item} onSelect={onOpenShortcut} />
+				));
+			case 'request':
+				return items.map(item => (
+					<RequestCard
+						key={item.id}
+						request={item}
+						onSelect={onSelectItem}
+						onFocus={onFocusItem}
+					/>
+				));
+			case 'genre':
+				return items.map(item => (
+					<GenreCard
+						key={item.id}
+						genre={item}
+						mediaType={config.mediaType}
+						onSelect={onSelectGenre}
+						onFocus={onFocusItem}
+					/>
+				));
+			case 'network':
+				return items.map(item => (
+					<NetworkCard key={item.id} network={item} onSelect={onSelectNetwork} />
+				));
+			case 'studio':
+				return items.map(item => (
+					<StudioCard key={item.id} studio={item} onSelect={onSelectStudio} />
+				));
+			default:
+				return items.map(item => (
+					<MediaCard
+						key={item.id}
+						item={item}
+						mediaType={config.mediaType}
+						onSelect={onSelectItem}
+						onFocus={onFocusItem}
+					/>
+				));
+		}
+	}, [config.type, config.mediaType, items, onSelectItem, onSelectGenre, onSelectNetwork, onSelectStudio, onOpenShortcut, onFocusItem]);
+
+	return (
+		<div className={css.contentRow} data-row-index={rowIndex}>
+			<h2 className={css.rowTitle}>{config.title}</h2>
+			<div className={css.rowScroller} ref={scrollerRef}>
+				<RowContainer
+					className={css.rowItems}
+					spotlightId={`discover-row-${rowIndex}`}
+					onKeyDown={handleKeyDown}
+					onFocus={handleFocus}
+				>
+					{renderCards}
+					{isLoading && (
+						<div className={css.rowLoadingIndicator}>
+							<span>{$L('Loading...')}</span>
+						</div>
+					)}
+				</RowContainer>
+			</div>
+		</div>
+	);
+});
+
+// Badge count survives panel switches for a short while so revisiting
+// discover doesn't refetch the counts every time.
+let cachedBadge = {count: 0, at: 0};
+const BADGE_TTL_MS = 60000;
+
+const SeerrDiscover = ({onSelectItem, onSelectGenre, onSelectNetwork, onSelectStudio, onOpenRequests, onOpenShortcut, backHandlerRef}) => {
+	const {isAuthenticated, isEnabled, user: contextUser} = useSeerr();
+	const {settings} = useSettings();
+	const [rows, setRows] = useState({});
+	const [rowPages, setRowPages] = useState({});
+	const [rowHasMore, setRowHasMore] = useState({});
+	const [rowLoading, setRowLoading] = useState({});
+	const [isLoading, setIsLoading] = useState(true);
+	const [backdropUrl, setBackdropUrl] = useState('');
+	const [focusedItem, setFocusedItem] = useState(null);
+	const [requestsBadge, setRequestsBadge] = useState(cachedBadge.count);
+	const backdropTimeoutRef = useRef(null);
+	const rowsContainerRef = useRef(null);
+
+	// Back on a scrolled discover list returns it to the first row before it leaves
+	useEffect(() => {
+		if (!backHandlerRef) return undefined;
+		const handler = () => {
+			const container = rowsContainerRef.current;
+			if (!isScrolledAway(container)) return false;
+			container.scrollTop = 0;
+			Spotlight.focus('discover-row-0');
+			return true;
+		};
+		backHandlerRef.current = handler;
+		return () => {
+			if (backHandlerRef.current === handler) backHandlerRef.current = null;
+		};
+	}, [backHandlerRef]);
+
+	useEffect(() => {
+		if (!isAuthenticated) return;
+		if (Date.now() - cachedBadge.at < BADGE_TTL_MS) {
+			setRequestsBadge(cachedBadge.count);
+			return;
+		}
+		let stale = false;
+		seerrApi.getUser().catch(() => null).then(async (u) => {
+			if (stale) return;
+			const perms = u?.permissions;
+			let count = 0;
+			if (seerrApi.canManageRequests(perms)) {
+				count += await seerrApi.getRequestCount().then(c => c?.pending || 0).catch(() => 0);
+			}
+			if (seerrApi.canManageIssues(perms)) {
+				count += await seerrApi.getIssueCount().then(c => c?.open || 0).catch(() => 0);
+			}
+			if (!stale) {
+				cachedBadge = {count, at: Date.now()};
+				setRequestsBadge(count);
+			}
+		});
+		return () => {
+			stale = true;
+		};
+	}, [isAuthenticated]);
+
+	useEffect(() => {
+		return () => {
+			if (backdropTimeoutRef.current) {
+				clearTimeout(backdropTimeoutRef.current);
+			}
+		};
+	}, []);
+
+	useEffect(() => {
+		const loadInitialData = async () => {
+			if (!isAuthenticated) return;
+			setIsLoading(true);
+			try {
+				// Prefer context user (Moonfin) or fall back to API user
+				const apiUser = await seerrApi.getUser().catch(() => null);
+				const currentUser = contextUser?.seerrUserId
+					? {id: contextUser.seerrUserId, ...apiUser}
+					: apiUser;
+
+				const [
+					myRequestsData,
+					trendingData,
+					moviesData,
+					tvData,
+					genreMovies,
+					genreTv,
+					upcomingMoviesData,
+					upcomingTvData
+				] = await Promise.all([
+					currentUser?.id ? seerrApi.getMyRequests(currentUser.id, 50).catch((e) => { console.error('[SeerrDiscover] myRequests error:', e); return {results: []}; }) : {results: []},
+					seerrApi.trending().catch(() => ({results: []})),
+					seerrApi.trendingMovies(1).catch(() => ({results: []})),
+					seerrApi.trendingTv(1).catch(() => ({results: []})),
+					seerrApi.getGenreSliderMovies().catch(() => []),
+					seerrApi.getGenreSliderTv().catch(() => []),
+					seerrApi.upcomingMovies(1).catch(() => ({results: []})),
+					seerrApi.upcomingTv(1).catch(() => ({results: []}))
+				]);
+
+				const hydratedMyRequests = await hydrateRequestMediaItems(myRequestsData.results || []);
+
+				setRows({
+					shortcuts: getShortcuts(trendingData.results || []),
+					myRequests: hydratedMyRequests,
+					trending: (trendingData.results || []).slice(0, ITEMS_PER_PAGE),
+					popularMovies: (moviesData.results || []).slice(0, ITEMS_PER_PAGE),
+					popularTv: (tvData.results || []).slice(0, ITEMS_PER_PAGE),
+					genreMovies: genreMovies || [],
+					genreTv: genreTv || [],
+					studios: MOVIE_STUDIOS,
+					networks: STREAMING_NETWORKS,
+					upcomingMovies: (upcomingMoviesData.results || []).slice(0, ITEMS_PER_PAGE),
+					upcomingTv: (upcomingTvData.results || []).slice(0, ITEMS_PER_PAGE)
+				});
+
+				// Track pagination state
+				setRowPages({
+					trending: 1,
+					popularMovies: 1,
+					popularTv: 1,
+					upcomingMovies: 1,
+					upcomingTv: 1
+				});
+
+				// Track if more items available (API returns 20 per page, so if we got 20, there's likely more)
+				setRowHasMore({
+					trending: (trendingData.results || []).length >= 20,
+					popularMovies: (moviesData.results || []).length >= 20,
+					popularTv: (tvData.results || []).length >= 20,
+					upcomingMovies: (upcomingMoviesData.results || []).length >= 20,
+					upcomingTv: (upcomingTvData.results || []).length >= 20
+				});
+			} catch (err) {
+				console.error('Failed to load Seerr data:', err);
+			} finally {
+				setIsLoading(false);
+			}
+		};
+
+		if (isAuthenticated) {
+			loadInitialData();
+		} else {
+			setIsLoading(false);
+		}
+	}, [isAuthenticated, contextUser]);
+
+	// Load more items for a specific row
+	const loadMoreForRow = useCallback(async (rowId) => {
+		if (rowLoading[rowId] || !rowHasMore[rowId]) return;
+
+		const config = getRowConfigs().find(r => r.id === rowId);
+		if (!config || !config.fetchFn) return;
+
+		setRowLoading(prev => ({...prev, [rowId]: true}));
+
+		try {
+			const currentPage = rowPages[rowId] || 1;
+			const nextPage = currentPage + 1;
+
+			let data;
+			switch (config.fetchFn) {
+				case 'trending':
+					data = await seerrApi.trending(nextPage);
+					break;
+				case 'trendingMovies':
+					data = await seerrApi.trendingMovies(nextPage);
+					break;
+				case 'trendingTv':
+					data = await seerrApi.trendingTv(nextPage);
+					break;
+				case 'upcomingMovies':
+					data = await seerrApi.upcomingMovies(nextPage);
+					break;
+				case 'upcomingTv':
+					data = await seerrApi.upcomingTv(nextPage);
+					break;
+				default:
+					return;
+			}
+
+			const newItems = data.results || [];
+			if (newItems.length > 0) {
+				setRows(prev => {
+					const existingIds = new Set(prev[rowId].map(item => item.id));
+					const uniqueNew = newItems.filter(item => !existingIds.has(item.id));
+					return {...prev, [rowId]: [...prev[rowId], ...uniqueNew.slice(0, ITEMS_PER_PAGE)]};
+				});
+				setRowPages(prev => ({...prev, [rowId]: nextPage}));
+				setRowHasMore(prev => ({...prev, [rowId]: newItems.length >= 20}));
+			} else {
+				setRowHasMore(prev => ({...prev, [rowId]: false}));
+			}
+		} catch (err) {
+			console.error(`Failed to load more for ${rowId}:`, err);
+		} finally {
+			setRowLoading(prev => ({...prev, [rowId]: false}));
+		}
+	}, [rowLoading, rowHasMore, rowPages]);
+
+	const handleItemFocus = useCallback((item) => {
+		setFocusedItem(item);
+		if (backdropTimeoutRef.current) {
+			clearTimeout(backdropTimeoutRef.current);
+		}
+		backdropTimeoutRef.current = setTimeout(() => {
+			if (item?.backdrop_path || item?.backdropPath) {
+				const path = item.backdrop_path || item.backdropPath;
+				setBackdropUrl(seerrApi.getImageUrl(path, 'w1280'));
+			} else if (item?.backdrops?.length > 0) {
+				setBackdropUrl(seerrApi.getImageUrl(item.backdrops[0], 'w1280'));
+			}
+		}, 150);
+	}, []);
+
+	const handleSelectItem = useCallback((item, mediaType) => {
+		const type = mediaType || item.media_type || item.mediaType || (item.title ? 'movie' : 'tv');
+		lastFocusedCardIndex = focusedCardIndex(`discover-row-${lastFocusedRowIndex}`, document.activeElement);
+		onSelectItem?.({
+			mediaId: item.id,
+			mediaType: type,
+			libraryId: item._seerrLibraryId || libraryIdOf(item.mediaInfo)
+		});
+	}, [onSelectItem]);
+
+	const visibleRows = useMemo(() => {
+		return getRowConfigs().filter(r => rows[r.id]?.length > 0);
+	}, [rows]);
+
+	const handleRequestsPillKeyDown = useCallback((e) => {
+		if (e.keyCode === KEYS.UP || e.keyCode === KEYS.LEFT) {
+			e.preventDefault();
+			e.stopPropagation();
+			Spotlight.focus('navbar');
+		} else if (e.keyCode === KEYS.DOWN) {
+			e.preventDefault();
+			e.stopPropagation();
+			Spotlight.focus('discover-row-0');
+		}
+	}, []);
+
+	const handleNavigateUp = useCallback((fromRowIndex) => {
+		if (fromRowIndex === 0) {
+			// The requests pill sits between the rows and the navbar.
+			if (Spotlight.focus('discover-requests-pill')) {
+				return;
+			}
+			Spotlight.focus('navbar');
+			return;
+		}
+		const targetIndex = fromRowIndex - 1;
+		Spotlight.focus(`discover-row-${targetIndex}`);
+		const targetRow = document.querySelector(`[data-row-index="${targetIndex}"]`);
+		if (targetRow) {
+			targetRow.scrollIntoView({behavior: 'smooth', block: 'start'});
+		}
+	}, []);
+
+	const handleNavigateDown = useCallback((fromRowIndex) => {
+		const targetIndex = fromRowIndex + 1;
+		if (targetIndex >= visibleRows.length) return;
+		Spotlight.focus(`discover-row-${targetIndex}`);
+		const targetRow = document.querySelector(`[data-row-index="${targetIndex}"]`);
+		if (targetRow) {
+			targetRow.scrollIntoView({behavior: 'smooth', block: 'center'});
+		}
+	}, [visibleRows.length]);
+
+	const handleRowFocus = useCallback((rowIndex) => {
+		if (typeof rowIndex === 'number') {
+			// A card index only means anything in the row it came from.
+			if (rowIndex !== lastFocusedRowIndex) lastFocusedCardIndex = -1;
+			lastFocusedRowIndex = rowIndex;
+		}
+	}, []);
+
+	useEffect(() => {
+		if (!isLoading && visibleRows.length > 0) {
+			setTimeout(() => {
+				if (lastFocusedRowIndex !== null && lastFocusedRowIndex < visibleRows.length) {
+					const rowId = `discover-row-${lastFocusedRowIndex}`;
+					const card = cardToRestore(rowId, lastFocusedCardIndex);
+					if (!card || !Spotlight.focus(card)) {
+						Spotlight.focus(rowId);
+					}
+					const targetRow = document.querySelector(`[data-row-index="${lastFocusedRowIndex}"]`);
+					if (targetRow) {
+						targetRow.scrollIntoView({block: 'center'});
+					}
+				} else {
+					Spotlight.focus('discover-row-0');
+				}
+			}, 100);
+		}
+	}, [isLoading, visibleRows.length]);
+
+	if (!isEnabled) {
+		return (
+			<div className={css.container}>
+				<div className={css.notConfigured}>
+					<p>{$L('Seerr is not enabled.')}</p>
+					<p>{$L('Go to Settings to configure Seerr.')}</p>
+				</div>
+			</div>
+		);
+	}
+
+	if (!isAuthenticated) {
+		return (
+			<div className={css.container}>
+				<div className={css.notConfigured}>
+					<p>{$L('Seerr is not authenticated.')}</p>
+					<p>{$L('Go to Settings to log in to Seerr.')}</p>
+				</div>
+			</div>
+		);
+	}
+
+	return (
+		<div className={css.container}>
+			{settings.showHomeBackdrop !== false && (
+				<div className={css.backdrop}>
+					{backdropUrl && (
+						<div
+							className={css.backdropImage}
+							style={{
+								backgroundImage: `url(${backdropUrl})`,
+								filter: settings.backdropBlurHome > 0 ? `blur(${settings.backdropBlurHome}px)` : 'none'
+							}}
+						/>
+					)}
+					<div className={css.backdropOverlay} />
+				</div>
+			)}
+			{!isLoading && isAuthenticated && onOpenRequests && (
+				<SpottableDiv
+					className={`${css.requestsPill} ${settings.navbarPosition === 'left' ? '' : css.requestsPillBelowNav}`}
+					spotlightId="discover-requests-pill"
+					onClick={onOpenRequests}
+					onKeyDown={handleRequestsPillKeyDown}
+				>
+					{$L('Requests')}
+					{requestsBadge > 0 && <span className={css.requestsPillBadge}>{requestsBadge}</span>}
+				</SpottableDiv>
+			)}
+			{isLoading ? (
+				<LoadingSpinner />
+			) : (
+				<div className={`${css.mainContent} ${settings.navbarPosition === 'left' ? css.sidebarOffset : ''}`}>
+					{/* Detail section for focused item - always present for consistent split view */}
+					<div className={css.detailSection}>
+						{focusedItem && (focusedItem.title || focusedItem.name) ? (
+							<>
+								<h2 className={css.detailTitle}>{focusedItem.title || focusedItem.name}</h2>
+								<div className={css.detailMeta}>
+									{focusedItem.vote_average > 0 && (
+										<span className={css.detailRating}>★ {focusedItem.vote_average?.toFixed(1)}</span>
+									)}
+									{(focusedItem.release_date || focusedItem.first_air_date) && (
+										<span className={css.detailYear}>
+											{(focusedItem.release_date || focusedItem.first_air_date)?.substring(0, 4)}
+										</span>
+									)}
+								</div>
+								{focusedItem.overview && (
+									<p className={css.detailOverview}>{focusedItem.overview}</p>
+								)}
+							</>
+						) : (
+							<h2 className={css.detailTitle}>{$L('Discover')}</h2>
+						)}
+					</div>
+					<div className={css.rowsContainer} ref={rowsContainerRef}>
+						{visibleRows.map((config, index) => (
+							<DiscoverRow
+								key={config.id}
+								config={config}
+								items={rows[config.id] || []}
+								rowIndex={index}
+								isLoading={rowLoading[config.id]}
+								onSelectItem={handleSelectItem}
+								onSelectGenre={onSelectGenre}
+								onSelectNetwork={onSelectNetwork}
+								onSelectStudio={onSelectStudio}
+								onOpenShortcut={onOpenShortcut}
+								onFocusItem={handleItemFocus}
+								onNavigateUp={handleNavigateUp}
+								onNavigateDown={handleNavigateDown}
+								onLoadMore={loadMoreForRow}
+								onRowFocus={handleRowFocus}
+							/>
+						))}
+					</div>
+				</div>
+			)}
+		</div>
+	);
+};
+
+export default SeerrDiscover;

@@ -1,0 +1,41 @@
+.tabBar {
+	display: inline-flex;
+	flex-direction: row;
+	flex-wrap: nowrap;
+	align-items: center;
+	padding: 4px;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.08);
+}
+
+// The segments butt up against each other so the selected one reads as a thumb
+// sliding along a single track rather than as a row of separate pills.
+.tab {
+	display: flex;
+	align-items: center;
+	height: 55px;
+	padding: 0 22px;
+	border: 3px solid transparent;
+	border-radius: 999px;
+	background: transparent;
+	color: rgba(255, 255, 255, 0.75);
+	font-size: 19px;
+	font-weight: 500;
+	line-height: 1.4;
+	white-space: nowrap;
+	box-sizing: border-box;
+	cursor: pointer;
+	outline: none;
+	transition: background-color 0.2s ease, color 0.2s ease, border-color 0.12s ease;
+}
+
+.tabActive {
+	background: rgba(255, 255, 255, 0.22);
+	color: #fff;
+	font-weight: 600;
+}
+
+.tab:focus {
+	border-color: var(--theme-focus-border-color, #ffffff);
+	box-shadow: 0 0 14px 1px rgba(255, 255, 255, 0.25), 0 8px 18px rgba(0, 0, 0, 0.35);
+}

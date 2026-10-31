@@ -1,0 +1,140 @@
+import {buildThemeOverrideCss} from './themeOverrides';
+import {resolveThemeById} from './themeRegistry';
+import {contrastRatio, deepenForLightInk, inkOn, toCssColor, MIN_BUTTON_CONTRAST, MIN_LIGHT_INK_CONTRAST} from './themeSpec';
+
+describe('deepenForLightInk', () => {
+	const white = '#ffffffff';
+
+	it('takes a bright fill down until light text reads on it', () => {
+		const deepened = deepenForLightInk('#ff00a4dc');
+		expect(contrastRatio('#ff00a4dc', white)).toBeLessThan(MIN_LIGHT_INK_CONTRAST);
+		expect(contrastRatio(deepened, white)).toBeGreaterThanOrEqual(MIN_LIGHT_INK_CONTRAST);
+		expect(inkOn(deepened)).toBe('255, 255, 255');
+	});
+
+	it('leaves a fill that is already dark enough alone', () => {
+		expect(deepenForLightInk('#ff101010')).toBe('#ff101010');
+	});
+
+	// Near white is the worst case, since it has the furthest to travel.
+	it('gets there even from the palest fill a theme can name', () => {
+		expect(contrastRatio(deepenForLightInk('#fffefefe'), white))
+			.toBeGreaterThanOrEqual(MIN_LIGHT_INK_CONTRAST);
+	});
+
+	it('keeps the alpha the theme asked for', () => {
+		expect(deepenForLightInk('#8000a4dc').slice(0, 3)).toBe('#80');
+	});
+});
+
+describe('buildThemeOverrideCss', () => {
+	it('scopes every rule to the active theme id', () => {
+		const css = buildThemeOverrideCss(resolveThemeById('moonfin'));
+		const selectors = css.split('\n').filter(Boolean);
+		expect(selectors.length).toBeGreaterThan(50);
+		for (const line of selectors) {
+			expect(line.startsWith("html[data-theme-id='moonfin'][data-theme-id]")).toBe(true);
+		}
+	});
+
+	it('emits literal theme colors instead of custom properties', () => {
+		const css = buildThemeOverrideCss(resolveThemeById('moonfin'));
+		expect(css).toContain('rgb(0, 164, 220)');
+		expect(css).not.toContain('var(--theme');
+	});
+
+	it('emits the nav color cycle per slot for themes that have one', () => {
+		const css = buildThemeOverrideCss(resolveThemeById('neon_pulse'));
+		expect(css).toContain("[data-nav-slot='1'] { color: rgb(255, 46, 146); }");
+		expect(css).toContain("[data-nav-slot='2'] { color: rgb(0, 229, 255); }");
+		const moonfin = buildThemeOverrideCss(resolveThemeById('moonfin'));
+		expect(moonfin).not.toContain('data-nav-slot');
+	});
+
+	it('squares off radii for pixel themes', () => {
+		const css = buildThemeOverrideCss(resolveThemeById('8bit_hero'));
+		expect(css).toContain('border-radius: 0;');
+		const moonfin = buildThemeOverrideCss(resolveThemeById('moonfin'));
+		expect(moonfin).not.toContain('border-radius: 0;');
+	});
+
+	it('carries theme fonts as far as the wrapper that names its own', () => {
+		const eightbit = buildThemeOverrideCss(resolveThemeById('8bit_hero'));
+		expect(eightbit).toContain('.sandstone-theme');
+		expect(eightbit).toContain("font-family: 'EightBitHero', sans-serif;");
+		// Neon Pulse saves its display face for titles and reads body copy in the
+		// condensed companion.
+		const neon = buildThemeOverrideCss(resolveThemeById('neon_pulse'));
+		expect(neon).toContain("font-family: 'NeonPulseBody', sans-serif; letter-spacing: 0.6px;");
+		const moonfin = buildThemeOverrideCss(resolveThemeById('moonfin'));
+		expect(moonfin).not.toContain('font-family');
+	});
+
+	it('fills the media bar card from its own overlay setting', () => {
+		const theme = resolveThemeById('moonfin');
+		// Three quarters of the chosen opacity.
+		expect(buildThemeOverrideCss(theme, {mediaBarOverlayColor: 'black', mediaBarOverlayOpacity: 100}))
+			.toContain('background-color: rgba(0, 0, 0, 0.75)');
+		expect(buildThemeOverrideCss(theme)).toContain('background-color: rgba(107, 114, 128, 0.375)');
+	});
+
+	it('prefers the focus border color setting over the theme focus border', () => {
+		const theme = resolveThemeById('moonfin');
+		expect(buildThemeOverrideCss(theme, {focusBorderColor: '#ff0000'})).toContain('rgb(255, 0, 0)');
+		expect(buildThemeOverrideCss(theme, {focusBorderColor: 'nonsense'})).not.toContain('nonsense');
+	});
+});
+
+describe('ink on a focused row', () => {
+	it('picks dark text on a bright fill and light on a dim one', () => {
+		expect(inkOn('#FF00E5FF')).toBe('0, 0, 0');
+		expect(inkOn('#FFFFCD75')).toBe('0, 0, 0');
+		expect(inkOn('#FF00A4DC')).toBe('0, 0, 0');
+		expect(inkOn('#FF101010')).toBe('255, 255, 255');
+		expect(inkOn('#FF2A2A2A')).toBe('255, 255, 255');
+	});
+
+	// A focused row is deepened rather than inverted, so every theme writes it in light ink on a
+	// fill taken far enough down to carry it.
+	it('writes every theme\'s focused rows in light ink on a fill deepened to take it', () => {
+		for (const id of ['moonfin', 'neon_pulse', '8bit_hero']) {
+			const theme = resolveThemeById(id);
+			const fill = deepenForLightInk(theme.colors.buttonFocused);
+			const css = buildThemeOverrideCss(theme);
+
+			expect(inkOn(fill)).toBe('255, 255, 255');
+			expect(contrastRatio(fill, '#ffffffff')).toBeGreaterThanOrEqual(MIN_LIGHT_INK_CONTRAST);
+			expect(css).toContain('rgba(255, 255, 255, 0.96)');
+			expect(css).toContain('rgba(255, 255, 255, 0.78)');
+			expect(css).toContain(`background: ${toCssColor(fill)};`);
+		}
+	});
+
+	// The one rule that fills a button with the theme's focus colour and writes on it.
+	const focusedButtonRule = (id) => buildThemeOverrideCss(resolveThemeById(id))
+		.split('\n')
+		.find((line) => line.includes('.actionButton:focus'));
+
+	it('drops a button colour the theme asked for when it cannot be read on its own fill', () => {
+		// Neon Pulse asks for white on a bright cyan, which comes to 1.5 to 1.
+		const neon = resolveThemeById('neon_pulse');
+		expect(contrastRatio(neon.colors.buttonFocused, neon.colors.onButtonFocused)).toBeLessThan(MIN_BUTTON_CONTRAST);
+		expect(focusedButtonRule('neon_pulse')).toContain('color: rgba(0, 0, 0, 0.92)');
+	});
+
+	it('keeps a button colour the theme asked for when it holds up', () => {
+		// 8bit Hero pairs a dark ink with its own amber, which reads at 11 to 1.
+		const pixel = resolveThemeById('8bit_hero');
+		expect(contrastRatio(pixel.colors.buttonFocused, pixel.colors.onButtonFocused)).toBeGreaterThan(MIN_BUTTON_CONTRAST);
+		expect(focusedButtonRule('8bit_hero')).toContain(`color: ${toCssColor(pixel.colors.onButtonFocused)}`);
+	});
+
+	it('leaves every theme with readable text on a focused button', () => {
+		for (const id of ['moonfin', 'neon_pulse', '8bit_hero']) {
+			const theme = resolveThemeById(id);
+			const declared = contrastRatio(theme.colors.buttonFocused, theme.colors.onButtonFocused);
+			const fallback = contrastRatio(theme.colors.buttonFocused, inkOn(theme.colors.buttonFocused) === '0, 0, 0' ? '#FF000000' : '#FFFFFFFF');
+			expect(Math.max(declared, fallback)).toBeGreaterThanOrEqual(MIN_BUTTON_CONTRAST);
+		}
+	});
+});

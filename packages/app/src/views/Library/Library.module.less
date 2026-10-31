@@ -1,0 +1,879 @@
+@accent: var(--theme-accent, #00a4dc);
+
+@import '../../styles/mixins.less';
+
+.page {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	overflow: hidden;
+	background: var(--theme-background, #101010);
+	background: -webkit-linear-gradient(315deg, var(--theme-background, #101010) 0%, var(--theme-surface, #1a1a1a) 100%);
+	background: linear-gradient(135deg, var(--theme-background, #101010) 0%, var(--theme-surface, #1a1a1a) 100%);
+}
+
+.content {
+	position: relative;
+	z-index: 1;
+	height: 100%;
+	display: -webkit-flex;
+	display: flex;
+	-webkit-flex-direction: column;
+	flex-direction: column;
+	overflow: visible;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+/* The search sits on the right with a matching blank on the left, so the title
+   stays centred on the screen rather than on what is left of the row. */
+.header {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	padding: 12px 87px 6px;
+}
+
+.headerSide {
+	width: 380px;
+	-webkit-flex: 0 0 380px;
+	flex: 0 0 380px;
+}
+
+.headerTitle {
+	-webkit-flex: 1;
+	flex: 1;
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: baseline;
+	align-items: baseline;
+	-webkit-justify-content: center;
+	justify-content: center;
+	min-width: 0;
+	padding: 0 16px;
+}
+
+.searchWrap {
+	position: relative;
+}
+
+.searchIcon {
+	.search-glyph();
+}
+
+.searchField {
+	.search-field();
+}
+
+.libraryTitle {
+	font-size: 38px;
+	font-weight: 300;
+	color: var(--theme-text-primary, white);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}
+
+.itemCount {
+	font-size: 17px;
+	color: rgba(255, 255, 255, 0.4);
+	color: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.4);
+	margin-left: 17px;
+	font-weight: 400;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+/* ── Breadcrumb (folder view) ────────────────────────────── */
+.breadcrumb {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	-webkit-flex-wrap: wrap;
+	flex-wrap: wrap;
+}
+
+.breadcrumbSegment {
+	display: inline-flex;
+	align-items: center;
+}
+
+.breadcrumbItem {
+	background: none;
+	border: 2px solid transparent;
+	border-radius: 6px;
+	color: var(--theme-text-secondary, rgba(255, 255, 255, 0.6));
+	font-size: 26px;
+	font-weight: 600;
+	padding: 2px 8px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+
+	&:focus {
+		outline: none;
+		color: var(--theme-text-primary, white);
+		border-color: @accent;
+		background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.08);
+	}
+}
+
+.breadcrumbSep {
+	font-size: 28px;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.3));
+	margin: 0 4px;
+}
+
+.breadcrumbCurrent {
+	font-size: 32px;
+	font-weight: 700;
+	color: var(--theme-text-primary, white);
+	padding: 2px 8px;
+}
+
+.sortArrow {
+	width: 20px;
+	height: 20px;
+	margin-left: auto;
+	flex-shrink: 0;
+	fill: @accent;
+}
+
+/* ── Card text ───────────────────────────────────────────── */
+/* Two lines at most. The grid reserves the row this sits in, so a translation
+   with a taller line would otherwise push the card past the cell it was given. */
+.cardText {
+	padding-top: 4px;
+	max-height: 57px;
+	overflow: hidden;
+}
+
+.cardTitle {
+	font-size: 19px;
+	font-weight: 700;
+	line-height: 1.2;
+	color: var(--theme-text-primary, #ffffff);
+	text-shadow: 0 0 4px rgba(0, 0, 0, 0.54);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.cardSubtitle {
+	font-size: 17px;
+	line-height: 1.2;
+	color: rgba(255, 255, 255, 0.6);
+	color: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.6);
+	text-shadow: 0 0 4px rgba(0, 0, 0, 0.54);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* ── Focused item info ───────────────────────────────────── */
+/* A fixed height, so the grid holds still as focus moves between items that
+   have different amounts to say. */
+.focusedInfo {
+	padding: 3px 87px 0;
+	height: 152px;
+	box-sizing: border-box;
+	overflow: hidden;
+}
+
+.focusedName {
+	font-size: 29px;
+	font-weight: 600;
+	color: var(--theme-text-primary, white);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.focusedMeta {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	-webkit-flex-wrap: wrap;
+	flex-wrap: wrap;
+	margin-top: 3px;
+	margin-bottom: 6px;
+}
+
+.metaItem {
+	font-size: 20px;
+	font-weight: 500;
+	color: rgba(255, 255, 255, 0.7);
+	color: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.7);
+}
+
+.metaPill {
+	padding: 3px 9px;
+	border-radius: 6px;
+	font-size: 16px;
+	font-weight: 900;
+	color: #fff;
+}
+
+.metaPillLive {
+	background: #22c55e;
+}
+
+.metaPillEnded {
+	background: #ef4444;
+}
+
+.metaPillRating {
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.15);
+}
+
+/* ── Toolbar ─────────────────────────────────────────────── */
+.toolbar {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	padding: 12px 87px 14px;
+}
+
+.toolbarBtn {
+	.toolbar-button();
+
+	& ~ & {
+		margin-left: 3px;
+	}
+}
+
+.toolbarIcon {
+	.toolbar-icon();
+}
+
+.toolbarBtn:focus .toolbarIcon {
+	fill: var(--theme-background, #101010);
+}
+
+/* ── Letter Navigation ───────────────────────────────────── */
+.letterNav {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	margin-left: 15px;
+	-webkit-flex: 1;
+	flex: 1;
+}
+
+/* Bare letters that only pick up an outline and the accent colour on focus,
+   with no fill of their own. */
+.letterButton {
+	background: none;
+	border: 2px solid transparent;
+	border-radius: 6px;
+	width: 44px;
+	height: 44px;
+	padding: 0;
+	box-sizing: border-box;
+	color: rgba(255, 255, 255, 0.85);
+	color: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.85);
+	font-size: 22px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: color 0.12s ease, border-color 0.12s ease;
+
+	&:focus {
+		outline: none;
+		border-color: @accent;
+		color: @accent;
+		font-weight: 700;
+	}
+
+	&.active {
+		color: @accent;
+		font-weight: 700;
+	}
+}
+
+/* ── Grid ────────────────────────────────────────────────── */
+/* The horizontal inset lives on .grid rather than here, because .gridWrapper is
+   positioned against this element's padding box and would ignore it. */
+.gridContainer {
+	-webkit-flex: 1;
+	flex: 1;
+	overflow: hidden;
+	position: relative;
+	padding: 10px 0 0;
+
+	/* hide scrollbars on all nested scrollable elements */
+	* {
+		overflow: -moz-scrollbars-none;
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+
+		&::-webkit-scrollbar {
+			display: none;
+			width: 0;
+			height: 0;
+		}
+	}
+}
+
+.groupRows {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	overflow-y: auto;
+	overflow-x: hidden;
+	/* room below the last row so it can scroll up under the toolbar */
+	padding: 10px 0 60vh;
+	-ms-overflow-style: none;
+	scrollbar-width: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+	}
+}
+
+.gridWrapper {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+}
+
+.grid {
+	height: 100%;
+	padding: 10px 87px;
+	overflow: -moz-scrollbars-none;
+	-ms-overflow-style: none;
+	scrollbar-width: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+		width: 0;
+		height: 0;
+	}
+}
+
+/* ── Item Cards ──────────────────────────────────────────── */
+/* The padding comes from the grid, which sizes it to hold both the gap between
+   two cards and the room a focused one grows into. */
+.itemCard {
+	position: relative;
+	box-sizing: border-box;
+	cursor: pointer;
+	border-radius: 8px;
+	overflow: visible;
+	background: transparent;
+
+	&:focus {
+		outline: none;
+		z-index: 10;
+
+		.itemCardInner {
+			transform: scale(1.05);
+		}
+
+		.poster {
+			border-color: var(--theme-focus-border-color, #ffffff);
+		}
+	}
+}
+
+.itemCardInner {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	transition: transform 0.2s ease;
+
+	:global(.perf-low) &,
+	:global(.perf-mid) & {
+		transition: none;
+	}
+}
+
+/* The focus border is drawn inside the artwork, so the card is exactly as wide
+   as the cell gave it and the outer columns have nothing hanging over the edge. */
+.poster {
+	display: block;
+	box-sizing: border-box;
+	width: 100%;
+	height: 270px;
+	object-fit: cover;
+	border: 3px solid transparent;
+	border-radius: 8px;
+	transition: border-color 0.2s ease;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.05);
+
+	:global(.perf-low) &,
+	:global(.perf-mid) & {
+		transition: none;
+	}
+}
+
+/* ── Badges ──────────────────────────────────────────────── */
+.favoriteBadge {
+	.favorite-badge(26px, 15px);
+}
+
+.watchedBadge {
+	.watched-badge();
+}
+
+.posterPlaceholder {
+	box-sizing: border-box;
+	width: 100%;
+	height: 270px;
+	border: 3px solid transparent;
+	border-radius: 8px;
+	background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.05);
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	-webkit-justify-content: center;
+	justify-content: center;
+}
+
+.placeholderIcon {
+	width: 60px;
+	height: 60px;
+	fill: var(--theme-text-muted, rgba(255, 255, 255, 0.3));
+}
+
+/* ── Status Bar ──────────────────────────────────────────── */
+.statusBar {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	padding: 6px 48px 10px;
+}
+
+.statusText {
+	-webkit-flex: 1;
+	flex: 1;
+	font-size: 14px;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.35));
+}
+
+.statusCount {
+	font-size: 14px;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.35));
+}
+
+/* ── Loading / Empty states ──────────────────────────────── */
+.skeletonGrid {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-flex-wrap: wrap;
+	flex-wrap: wrap;
+	-webkit-align-content: flex-start;
+	align-content: flex-start;
+	overflow: hidden;
+}
+
+.skeletonRow {
+	display: -webkit-flex;
+	display: flex;
+	overflow: hidden;
+}
+
+.skeletonCell {
+	-webkit-flex-shrink: 0;
+	flex-shrink: 0;
+	box-sizing: border-box;
+}
+
+/* Sized and placed like a card's title and subtitle lines. */
+.skeletonTitle {
+	height: 19px;
+	margin-top: 6px;
+}
+
+.skeletonSubtitle {
+	height: 17px;
+	margin-top: 4px;
+}
+
+.empty {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-flex-direction: column;
+	flex-direction: column;
+	-webkit-align-items: center;
+	align-items: center;
+	-webkit-justify-content: center;
+	justify-content: center;
+	height: 100%;
+	font-size: 24px;
+	color: var(--theme-text-secondary, rgba(255, 255, 255, 0.5));
+}
+
+/* ── Sort & Filter Slide-Out Panel ───────────────────────── */
+.sortPanelOverlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(var(--theme-scrim-rgb, 0, 0, 0), 0.45);
+	z-index: 100;
+	display: -webkit-flex;
+	display: flex;
+	-webkit-justify-content: flex-end;
+	justify-content: flex-end;
+}
+
+.sortPanel {
+	/* 380px inside, with the padding and border counted in so the panel stops at the screen edge. */
+	width: 445px;
+	height: 100%;
+	box-sizing: border-box;
+	background: rgba(var(--theme-surface-rgb, 20, 20, 40), 0.92);
+	backdrop-filter: blur(16px) saturate(1.3);
+	-webkit-backdrop-filter: blur(16px) saturate(1.3);
+	padding: 40px 32px;
+	overflow-y: auto;
+	scrollbar-width: none;
+	-ms-overflow-style: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+		width: 0;
+	}
+
+	animation: slideIn 0.25s ease-out;
+	border-left: 1px solid rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.08);
+}
+
+@keyframes slideIn {
+	from {
+		transform: translateX(100%);
+	}
+	to {
+		transform: translateX(0);
+	}
+}
+
+.sortPanelTitle {
+	font-size: 32px;
+	font-weight: 700;
+	color: var(--theme-text-primary, white);
+	margin: 0 0 32px 0;
+}
+
+.filterSection {
+	border-top: 1px solid rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.1);
+	padding-top: 24px;
+
+	/* The panel title already sits above the first group, so it needs no line of its own. */
+	&:first-of-type {
+		border-top: none;
+		padding-top: 0;
+	}
+}
+
+/* Each group collapses to this heading, so it reads as a label but takes focus. */
+.sectionHeader {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	width: 100%;
+	/* The chip is here for the shape the option rows use, so a focused heading lines up
+	   with them. It stays flat until then. */
+	.theme-chip();
+	background: none;
+	border-color: transparent;
+	padding: 10px 12px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+
+	&:focus {
+		outline: none;
+		background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.1);
+		border-color: @accent;
+	}
+}
+
+.sectionHeaderOpen {
+	margin-bottom: 12px;
+}
+
+.sectionHeaderLabel {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.45));
+	text-transform: uppercase;
+	letter-spacing: 1px;
+	margin-left: 10px;
+	text-align: left;
+
+	.sectionHeader:focus &,
+	.sectionHeaderOpen & {
+		color: var(--theme-text-primary, white);
+	}
+}
+
+/* What the group is set to while it is closed, so a filter cant hide behind a heading. */
+.sectionSummary {
+	margin-left: auto;
+	padding-left: 12px;
+	max-width: 45%;
+	font-size: 15px;
+	font-weight: 500;
+	color: @accent;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.sectionChevron {
+	width: 18px;
+	height: 18px;
+	-webkit-flex-shrink: 0;
+	flex-shrink: 0;
+	fill: var(--theme-text-muted, rgba(255, 255, 255, 0.45));
+	-webkit-transition: -webkit-transform 0.15s ease;
+	transition: transform 0.15s ease;
+}
+
+.sectionChevronOpen {
+	-webkit-transform: rotate(90deg);
+	transform: rotate(90deg);
+	fill: @accent;
+}
+
+/* ── Sort / Filter option rows ───────────────────────────── */
+.sortOption {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	width: 100%;
+	.theme-chip();
+	padding: 14px 16px;
+	color: var(--theme-text-secondary, rgba(255, 255, 255, 0.8));
+	font-size: 18px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+
+	& ~ & {
+		margin-top: 4px;
+	}
+
+	&:focus {
+		outline: none;
+		background: rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.1);
+		border-color: @accent;
+		color: var(--theme-text-primary, white);
+	}
+
+	&.sortOptionActive {
+		color: var(--theme-text-primary, white);
+	}
+}
+
+.sortOptionLabel {
+	margin-left: 14px;
+	font-weight: 500;
+}
+
+.clearGroup {
+	color: @accent;
+}
+
+.clearGroupIcon {
+	width: 18px;
+	height: 18px;
+	fill: currentColor;
+	-webkit-flex-shrink: 0;
+	flex-shrink: 0;
+}
+
+.facetSearch {
+	margin: 4px 0 8px;
+}
+
+.facetNoResults {
+	padding: 12px 16px;
+	font-size: 15px;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.45));
+}
+
+/* Radio circle */
+.radioCircle {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	-webkit-justify-content: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	min-width: 22px;
+	border-radius: 50%;
+	border: 2px solid rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.35);
+	transition: border-color 0.15s ease;
+
+	.sortOptionActive & {
+		border-color: @accent;
+	}
+}
+
+.radioFill {
+	display: block;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: @accent;
+}
+
+/* Checkbox square */
+.checkboxSquare {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-align-items: center;
+	align-items: center;
+	-webkit-justify-content: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	min-width: 22px;
+	border-radius: 4px;
+	border: 2px solid rgba(var(--theme-on-surface-rgb, 255, 255, 255), 0.35);
+	transition: all 0.15s ease;
+	background: none;
+
+	.sortOptionActive & {
+		border-color: @accent;
+		background: @accent;
+	}
+}
+
+.checkIcon {
+	width: 16px;
+	height: 16px;
+	fill: var(--theme-on-accent, white);
+}
+
+/* ── Settings Panel Rows ─────────────────────────────────── */
+.settingsHeader {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.4));
+	text-transform: uppercase;
+	letter-spacing: 1.5px;
+	margin-bottom: 4px;
+}
+
+.settingRow {
+	display: -webkit-flex;
+	display: flex;
+	-webkit-flex-direction: column;
+	flex-direction: column;
+	width: 100%;
+	background: none;
+	border: 2px solid transparent;
+	border-radius: 8px;
+	padding: 18px 16px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+	text-align: left;
+
+	& ~ & {
+		margin-top: 4px;
+	}
+
+	&:focus {
+		outline: none;
+		background: var(--theme-button-active, rgba(255, 255, 255, 0.1));
+		border-color: @accent;
+	}
+}
+
+.settingLabel {
+	font-size: 19px;
+	font-weight: 600;
+	color: var(--theme-text-primary, white);
+}
+
+.settingValue {
+	font-size: 16px;
+	color: var(--theme-text-muted, rgba(255, 255, 255, 0.55));
+	margin-top: 4px;
+}
+
+:global(html[data-theme-id='neon_pulse']) {
+	.libraryTitle,
+	.focusedName,
+	.sortPanelTitle,
+	.modalTitle,
+	.musicLibraryTitle,
+	.musicSectionTitle,
+	.settingLabel {
+		color: var(--theme-accent, #ff2e92);
+		text-shadow: var(--theme-text-glow, 0 0 8px rgba(255, 46, 146, 0.35));
+		font-family: 'NeonPulseDisplay', sans-serif;
+		font-weight: bold;
+		letter-spacing: 0.4px;
+	}
+
+	.itemCount,
+	.focusedMeta,
+	.metaItem,
+	.statusText,
+	.statusCount,
+	.sectionHeaderLabel,
+	.settingsHeader,
+	.settingValue,
+	.cardSubtitle,
+	.musicViewLabel {
+		color: var(--theme-on-surface, #00e5ff);
+	}
+
+	.toolbarIcon {
+		fill: var(--theme-on-surface, #00e5ff);
+	}
+
+	.itemCard:focus .poster,
+	.itemCard:focus .posterPlaceholder {
+		border-color: var(--theme-accent, #ff2e92);
+		box-shadow: 0 0 12px rgba(var(--theme-accent-rgb, 255, 46, 146), 0.35);
+	}
+
+	.toolbarBtn:focus,
+	.musicHomeBtn:focus,
+	.musicViewBtn:focus,
+	.letterButton:focus,
+	.sortOption:focus,
+	.settingRow:focus,
+	.breadcrumbItem:focus {
+		border-color: var(--theme-accent, #ff2e92);
+		background: rgba(var(--theme-accent-rgb, 255, 46, 146), 0.15);
+	}
+
+	.letterButton.active {
+		background: var(--theme-accent, #ff2e92);
+		color: var(--theme-on-accent, #fff);
+		box-shadow: 0 0 8px rgba(var(--theme-accent-rgb, 255, 46, 146), 0.35);
+	}
+
+	.sortOption.sortOptionActive {
+		background: rgba(var(--theme-accent-rgb, 255, 46, 146), 0.12);
+	}
+
+	.radioFill {
+		background: var(--theme-accent, #ff2e92);
+	}
+}
+
+// Gap fallbacks, see styles/mixins.less. These sit last so a child that
+// declares its own margin further up cant beat them.
+.focusedMeta { .flex-wrap-gap(6px; 12px); }

@@ -1,0 +1,99 @@
+.row {
+	margin-bottom: 26px;
+	overflow: visible;
+	padding-left: 60px;
+	padding-right: 60px;
+	contain: layout style;
+	content-visibility: auto;
+	// A row below the fold stands in at a guessed height until it renders, and the
+	// guess is nowhere near a real one, so scrolling by offsetTop lands wrong. The
+	// auto keyword remembers the height a row last rendered at and stands in at
+	// that instead. Engines that dont take it keep the plain guess above.
+	contain-intrinsic-size: 0 620px;
+	contain-intrinsic-size: auto 620px;
+
+	&:first-child {
+		margin-top: 40px;
+	}
+}
+
+.fullScreenRows {
+	min-height: calc(~"100vh - 190px");
+	box-sizing: border-box;
+}
+
+.title {
+	font-size: 28px;
+	font-weight: 600;
+	margin: 6px 0 1px 0;
+	color: var(--theme-text-primary, #ffffff);
+	text-shadow: var(--theme-text-glow);
+}
+
+.subtitle {
+	font-size: 18px;
+	color: var(--theme-text-secondary, rgba(255, 255, 255, 0.5));
+	margin: 2px 0 0 0;
+}
+
+.scroller {
+	overflow-x: auto;
+	overflow-y: visible;
+	padding-left: 60px;
+	padding-right: 60px;
+	scrollbar-width: none;
+	margin-left: -60px;
+	margin-right: -60px;
+	-webkit-overflow-scrolling: touch;
+	transform: translateZ(0);
+	will-change: scroll-position;
+	contain: layout style;
+
+	&::-webkit-scrollbar {
+		display: none;
+	}
+}
+
+.items {
+	display: flex;
+	display: -webkit-flex;
+	padding: 10px 0 24px;
+	width: -webkit-max-content;
+	width: max-content;
+	transform: translateZ(0);
+	contain: layout style;
+	align-items: flex-start;
+
+	> * + * {
+		margin-left: 24px;
+	}
+}
+
+.platformWebos .title {
+	font-size: 29px;
+}
+
+.platformTizen {
+	contain-intrinsic-size: 0 590px;
+	contain-intrinsic-size: auto 590px;
+}
+
+.platformTizen .title {
+	font-size: 26px;
+}
+
+.platformTizen .items {
+	padding-bottom: 20px;
+}
+
+.platformLegacy {
+	padding-left: 48px;
+	padding-right: 48px;
+}
+
+.platformLegacy .scroller {
+	padding-left: 48px;
+	padding-right: 48px;
+	margin-left: -48px;
+	margin-right: -48px;
+}
