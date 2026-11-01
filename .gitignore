@@ -51,3 +51,8 @@ profiles.xml
 private/
 credentials/
 certificates/
+
+# Local torrent intake and personal operating instructions (not client source).
+/Torrents/
+/media
+/ТОРРЕНТЫ.md

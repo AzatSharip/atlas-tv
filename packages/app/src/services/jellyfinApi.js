@@ -1,3 +1,4 @@
+import {setImageSession, authenticatedImageUrl} from '../utils/authenticatedImageUrl';
 import packageJson from '../../package.json';
 import {buildQueryString} from '../utils/urlCompat';
 import {normalizeServerUrl} from '../utils/serverUrl';
@@ -37,10 +38,12 @@ const parentIdOf = (endpoint) => {
 
 export const setServer = (serverUrl) => {
 	currentServer = normalizeServerUrl(serverUrl);
+	setImageSession(currentServer, accessToken, serverType);
 };
 
 export const setServerType = (type) => {
 	serverType = type === 'emby' ? 'emby' : 'jellyfin';
+	setImageSession(currentServer, accessToken, serverType);
 };
 
 export const getServerType = () => serverType;
@@ -61,11 +64,12 @@ const withoutHiddenViews = async (views, user) => {
 };
 
 export const getUserImageUrl = (serverUrl, userId, imageTag, type) =>
-	buildUserImageUrl(serverUrl, userId, imageTag, type || serverType);
+	authenticatedImageUrl(buildUserImageUrl(serverUrl, userId, imageTag, type || serverType));
 
 export const setAuth = (userId, token) => {
 	currentUser = userId;
 	accessToken = token;
+	setImageSession(currentServer, accessToken, serverType);
 	accessDeniedParentIds.clear();
 	libraryIndex = null;
 	if (token) reportCapabilities();

@@ -1,3 +1,4 @@
+import {authenticatedImageUrl} from './authenticatedImageUrl';
 import {buildQueryString} from './urlCompat';
 
 export const formatDuration = (ticks) => {
@@ -25,7 +26,7 @@ export const getImageUrl = (serverUrl, itemId, imageType = 'Primary', options = 
 	if (options.quality) params.quality = options.quality;
 	if (options.tag) params.tag = options.tag;
 	const queryString = buildQueryString(params);
-	return `${serverUrl}/Items/${itemId}/Images/${imageType}${queryString ? '?' + queryString : ''}`;
+	return authenticatedImageUrl(`${serverUrl}/Items/${itemId}/Images/${imageType}${queryString ? '?' + queryString : ''}`);
 };
 
 // Resolves Seerr or TMDB artwork, which can be absolute, protocol-relative, or a path on its server.
