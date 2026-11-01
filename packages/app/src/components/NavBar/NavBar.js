@@ -181,7 +181,7 @@ const NavBar = ({
 						<NavPillButton Icon={FriendsIcon} slot={nextSlot()} label={$L('Friends')} onClick={onFriends} spotlightId="navbar-friends" badge={friendsBadge} />
 					)}
 
-					<NavPillButton Icon={SettingsIcon} slot={nextSlot()} label={$L('Settings')} onClick={onSettings} spotlightId="navbar-settings" />
+					{onSettings && <NavPillButton Icon={SettingsIcon} slot={nextSlot()} label={$L('Settings')} onClick={onSettings} spotlightId="navbar-settings" />}
 				</div>
 			</div>
 

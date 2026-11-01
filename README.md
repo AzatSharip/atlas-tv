@@ -14,6 +14,16 @@ A personal-media-focused fork of [Moonfin Smart TV](https://github.com/Moonfin-C
 
 Оригиналы не перемещаются и не изменяются. Сервер, учётную запись и библиотеки пользователь подключает сам. В исходниках нет настроек конкретного сервера.
 
+## Video release 3.0.0
+
+- Hide archive branches with no videos, including nested empty branches; refresh while browsing.
+- Start video cards directly, with a large remote-selectable Continue / Start over dialog when server progress exists.
+- Larger movie posters, fixed-size library tiles, and preserved cartoon folders.
+- Fifteen-second seek buttons and accelerated held-arrow seeking; preserve progress if playback preparation is interrupted.
+- Optional enrolled-TV family mode: child, adult PIN and hidden owner PIN; server-side authorization, separate histories and cleared client state on account changes.
+
+Photos remain a later development stage. Family mode requires a separately configured broker/gateway; building the client alone does not secure a server.
+
 ## Build a Samsung package
 
 Use Node.js **22 LTS** and npm. Ensure both `node` and `npm` resolve to the same current installation.
@@ -24,7 +34,7 @@ node scripts/test-atlas-folders.cjs
 npm run build:tizen:oblong -- --skip-tizen-cli
 ```
 
-The result is an **unsigned** `Atlas_Tizen_Oblong_v2.11.3.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
+The result is an **unsigned** `Atlas_Tizen_Oblong_v3.0.0.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
 
 This fork intentionally retains the Tizen application/package IDs and existing `moonfin_*` storage keys for an in-place upgrade of an existing Moonfin installation signed with the **same author certificate**. Atlas and Moonfin therefore cannot coexist under these IDs. Do not uninstall your working client just to change the branding; keep a signed rollback package and a private settings backup outside this repository.
 
@@ -32,7 +42,7 @@ This fork intentionally retains the Tizen application/package IDs and existing `
 
 Add the existing media directory to a Jellyfin **Home videos and photos** library, then open it in Atlas. Folder view defaults on for that library type. Select a video to play it and subsequent video files in that folder, in its displayed sort order. Enable automatic playback in settings; the optional early “Next Up” action can be disabled for short clips. Back returns to the originating folder. Explicit playlists take priority. Subfolders, photos and metadata-only files are not silently added to the queue.
 
-Home-video detection happens at runtime from the library type; no library IDs or private paths are compiled into the app. Other movie/series libraries retain the upstream flow.
+Home-video detection happens at runtime from the library type; no library IDs or private paths are compiled into the app. Movie libraries also default to folder view, preserving grouped collections. Playable video cards start directly or offer a resume choice; item details remain available through the item menu.
 
 Optional [library covers](assets/library-covers) provide large Russian titles and the Atlas wordmark. Set a PNG as the corresponding library’s primary image in Jellyfin; editable SVG sources are included. These images do not change library paths or media files.
 
@@ -40,7 +50,7 @@ Optional [library covers](assets/library-covers) provide large Russian titles an
 
 The maintained target is Samsung Tizen, particularly 2018/Tizen 4 hardware. Other platform sources are inherited for provenance and are **not validated Atlas releases**. A successful build is not a promise that every codec, bitrate or server can play smoothly. Full video transcoding needs sufficient server capacity; portrait output and remote seeking still require real-device testing.
 
-Settings, authentication and optional integrations retain upstream behavior. See [PRIVACY.md](PRIVACY.md). Source-code attribution is also present in the app’s legal information. For upstream setup and architecture, see [the preserved upstream README](docs/UPSTREAM_README.md).
+Unenrolled installations retain the upstream account flow. Enrolled televisions use the optional [server-validated family profiles](docs/FAMILY_PROFILES.md), with isolated account history and private sessions. See [PRIVACY.md](PRIVACY.md). Source-code attribution is also present in the app’s legal information. For upstream setup and architecture, see [the preserved upstream README](docs/UPSTREAM_README.md).
 
 ## Artwork and license
 

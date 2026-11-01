@@ -262,7 +262,7 @@ const ModernMediaCard = ({
 		posterSize: settings.homeRowsPosterSize,
 		platform,
 		isSquareItem,
-		isStatic: isStaticMyMedia
+		isStatic: isStaticMyMedia, isMovie: item?.Type === 'Movie'
 	});
 	const canRenderExpanded = !isStaticMyMedia && !isSquareItem && (
 		Boolean(metadata || item?.CommunityRating || (shouldShowOverview && overviewText)) ||

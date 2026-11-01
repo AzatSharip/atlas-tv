@@ -82,7 +82,7 @@ const PROFILE_CHIPS = [
 
 
 const Settings = ({ onBack, onLibrariesChanged, onRunSetupWizard, onSelectItem, panelMode, initialView }) => {
-	const { api, serverUrl, accessToken, hasMultipleServers, logoutAll, activeServerInfo, user, serverType } = useAuth();
+	const { api, serverUrl, accessToken, hasMultipleServers, logoutAll, activeServerInfo, user, serverType, managedProfile } = useAuth();
 	const { settings, updateSetting, updateSettings, resetSettings, restoreSyncedDefaults, availableThemes, activeThemeId, selectThemeById, saveStoreTheme, deleteStoreTheme } = useSettings();
 	const { capabilities } = useDeviceInfo();
 	const seerr = useSeerr();
@@ -101,7 +101,8 @@ const Settings = ({ onBack, onLibrariesChanged, onRunSetupWizard, onSelectItem, 
 	// Category labels do not depend on anything but the locale, so they resolve without
 	// the settings context, which is not built until further down. The gate only reads the
 	// settings, which are in hand, and the search index already honours it the same way.
-	const categories = SETTINGS_SCHEMA
+	const profileSchema = managedProfile ? SETTINGS_SCHEMA.filter(category => !['accountSecurity', 'kidsMode'].includes(category.id)) : SETTINGS_SCHEMA;
+	const categories = profileSchema
 		.filter((category) => !category.when || category.when({settings}))
 		.map((category) => ({
 			id: category.id,
@@ -1219,9 +1220,9 @@ const Settings = ({ onBack, onLibrariesChanged, onRunSetupWizard, onSelectItem, 
 
 	const searchResults = useMemo(() => {
 		if (!showSearchResults) return [];
-		const index = buildSettingsIndex(SETTINGS_SCHEMA, settingsCtx, {resolve, spotlightIdOf});
+		const index = buildSettingsIndex(managedProfile ? SETTINGS_SCHEMA.filter(category => !['accountSecurity', 'kidsMode'].includes(category.id)) : SETTINGS_SCHEMA, settingsCtx, {resolve, spotlightIdOf});
 		return matchSettings(index, debouncedQuery);
-	}, [showSearchResults, debouncedQuery, settingsCtx]);
+	}, [showSearchResults, debouncedQuery, settingsCtx, managedProfile]);
 
 	searchResultsRef.current = searchResults;
 	searchQueryRef.current = searchQuery;

@@ -1,0 +1,23 @@
+.screen {
+    font-family: Arial, sans-serif;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 30000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #090d23, #171530); color: #edf1ff;
+    h1 img { width: 260px; height: auto; opacity: .65; }
+    h1 { font-size: 64px; letter-spacing: 12px; color: #9295c7; margin: 0 0 28px; }
+    h2 { font-size: 38px; margin: 10px 0 30px; }
+    button { font: inherit; font-size: 30px; color: inherit; background: #242b4a;
+        border: 3px solid transparent; border-radius: 16px; padding: 14px 32px; margin: 8px;
+        &:global(.spottable):global(.spotlight), &:focus { border-color: #94aff2; background: #343c65; outline: none; }
+    }
+    p { min-height: 35px; font-size: 25px; color: #bac8ef; }
+}
+.profiles { display: flex; margin-bottom: 36px; }
+.tile { display: flex; flex-direction: column; align-items: center; width: 300px; height: 300px; justify-content: center; }
+.childAvatar, .adultAvatar { display: flex; align-items: center; justify-content: center; width: 140px; height: 140px;
+    border-radius: 50%; margin-bottom: 25px; font-size: 84px; background: #534392; }
+.childAvatar { color: #fff0bc; background: #226c85; }
+.dots { height: 55px; letter-spacing: 12px; font-size: 35px; }
+.keys { width: 390px; display: flex; flex-wrap: wrap; justify-content: center;
+    button { width: 110px; height: 66px; padding: 10px; }
+}

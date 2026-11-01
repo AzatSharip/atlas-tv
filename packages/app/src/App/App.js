@@ -1,4 +1,5 @@
 import {useState, useCallback, useEffect, useMemo, lazy, Suspense, useRef} from 'react';
+import {resumeTicks, isPlayableVideo} from '../utils/videoResume';
 import {isKidsMode, blockedPanels, allowedPanel} from '../utils/kidsMode';
 import {
 	hashPin, pinMatches, lockoutRemaining, registerFailedAttempt, clearedLockout, tooManyAttempts,
@@ -12,6 +13,8 @@ import $L from '@enact/i18n/$L';
 
 import ilib from 'ilib';
 
+import {FamilyAuthProvider} from '../context/FamilyAuthContext';
+import {familyEnrollment} from '../services/familySession';
 import {AuthProvider, useAuth} from '../context/AuthContext';
 import {useSettings} from '../context/SettingsContext';
 import * as connectionPool from '../services/connectionPool';
@@ -47,6 +50,7 @@ import NavBar from '../components/NavBar';
 import Sidebar from '../components/Sidebar';
 import AccountModal from '../components/AccountModal';
 import ExitDialog from '../components/ExitDialog';
+import ResumeDialog from '../components/ResumeDialog/ResumeDialog';
 import LoadingSpinner from '../components/LoadingSpinner';
 import Screensaver from '../components/Screensaver';
 import SeasonalTheme from '../components/SeasonalTheme';
@@ -156,7 +160,7 @@ const PANELS = {
 };
 
 const AppContent = (props) => {
-	const {isAuthenticated, isLoading, logout, serverUrl, serverName, api, user, hasMultipleServers, accessToken, connectionState, revalidateSession} = useAuth();
+	const {isAuthenticated, isLoading, logout, serverUrl, serverName, api, user, hasMultipleServers, accessToken, connectionState, revalidateSession, managedProfile, openProfiles} = useAuth();
 	const {settings, activeTheme, syncOnLogin, updateSettings, loaded: settingsLoaded} = useSettings();
 	const {streamNotification, dismissStreamNotification, pluginInfo} = useSeerr();
 	const {pendingPopups, markPopupsRead} = useServerMessages();
@@ -252,6 +256,8 @@ const AppContent = (props) => {
 	const [seerrBrowse, setSeerrBrowse] = useState(null);
 	const [seerrPerson, setSeerrPerson] = useState(null);
 	const [authChecked, setAuthChecked] = useState(false);
+    const directGeneration = useRef(0);
+    const resumeChoiceRef = useRef(null);
 	const [libraries, setLibraries] = useState([]);
 	const [showAccountModal, setShowAccountModal] = useState(false);
 	const [showServerMessages, setShowServerMessages] = useState(false);
@@ -395,10 +401,10 @@ const AppContent = (props) => {
 	}, [isAuthenticated, settingsLoaded, user?.Id, serverUrl, connectionState]);
 
 	useEffect(() => {
-		if (!isAuthenticated || !user?.Configuration) return;
+		if (!settingsLoaded || !isAuthenticated || !user?.Configuration) return;
 		const seeded = seedLanguagePreferences(settings, user.Configuration, settings.uiLanguage, window.navigator?.language);
 		if (Object.keys(seeded).length > 0) updateSettings(seeded);
-	}, [isAuthenticated, user, settings, updateSettings]);
+	}, [settingsLoaded, isAuthenticated, user, settings, updateSettings]);
 
 	useEffect(() => {
 		if (!isPinGateActive) return;
@@ -660,7 +666,7 @@ const AppContent = (props) => {
 		}
 	}, [isLoading, isAuthenticated, authChecked]);
 
-	const kidsBlockedPanels = useMemo(() => blockedPanels(PANELS), []);
+	const kidsBlockedPanels = useMemo(() => managedProfile === 'child' ? [...blockedPanels(PANELS), PANELS.SETTINGS, PANELS.ADD_USER, PANELS.ADD_SERVER] : blockedPanels(PANELS), [managedProfile]);
 
 	const showPanel = useCallback((panel) => {
 		setPanelIndex(isKidsMode(settings)
@@ -699,6 +705,8 @@ const AppContent = (props) => {
 
 	useEffect(() => {
 		const handleKeyDown = (e) => {
+            if (resumeChoiceRef.current) return;
+            if (isBackKey(e)) directGeneration.current++;
 			// An arrow press means the user is done pointing. Spotlight flips
 			// this itself, but its window listener sits behind components that
 			// stop propagation, and a set pointer flag makes every programmatic
@@ -828,16 +836,37 @@ const AppContent = (props) => {
 		navigateTo(PANELS.PLAYER);
 	}, [navigateTo]);
 
-	const handleSelectItem = useCallback((item) => {
-		if (window.AtlasFolders.matches(item)) {
-			window.AtlasFolders.play(item, null, (options) => {
-				setPlayingItem(item);
-				setPlaybackOptions(options || null);
-				setIsResume(false);
-				navigateTo(PANELS.PLAYER);
-			});
-			return;
-		}
+    const [resumeChoice, setResumeChoice] = useState(null);
+    resumeChoiceRef.current = resumeChoice;
+    const startCardVideo = useCallback((item, resume) => {
+        const generation = ++directGeneration.current;
+        window.AtlasFolders.play(item, null, (options) => {
+            if (generation !== directGeneration.current) return;
+            setPlayingItem(item);
+            setPlaybackOptions(options || null);
+            setIsResume(resume);
+            navigateTo(PANELS.PLAYER);
+        });
+    }, [navigateTo]);
+    useEffect(() => () => { directGeneration.current++; }, []);
+    const closeResume = useCallback(() => {
+        const target = resumeChoice?.focus;
+        setResumeChoice(null);
+        window.requestAnimationFrame(() => { if (target) Spotlight.focus(target); });
+    }, [resumeChoice]);
+    const handleSelectItem = useCallback(async (item, detailsOnly = false) => {
+        if (!detailsOnly && isPlayableVideo(item)) {
+            const generation = ++directGeneration.current;
+            const focus = Spotlight.getCurrent();
+            try {
+                const fresh = {...item, ...await (connectionPool.getApiForItem(item) || api).getItem(item.Id)};
+                if (generation !== directGeneration.current) return;
+                const ticks = resumeTicks(fresh);
+                if (ticks) setResumeChoice({item: fresh, ticks, focus});
+                else startCardVideo(fresh, false);
+            } catch (_) { /* A failed authorization must never fall back to a stale item. */ }
+            return;
+        }
 		setDetailsAutoPlay(false);
 		// A channel has no details worth landing on, so it tunes straight away.
 		if (isLiveTvChannel(item)) {
@@ -868,7 +897,11 @@ const AppContent = (props) => {
 			setSelectedItem(item);
 			navigateTo(PANELS.DETAILS);
 		}
-	}, [navigateTo, panelIndex, selectedItem, handlePlayChannel]);
+	}, [api, navigateTo, panelIndex, selectedItem, handlePlayChannel, startCardVideo]);
+
+    const openItemDetails = useCallback(item => handleSelectItem(item, true), [handleSelectItem]);
+    const resumeSelected = useCallback(() => { const item = resumeChoice.item; setResumeChoice(null); startCardVideo(item, true); }, [resumeChoice, startCardVideo]);
+    const restartSelected = useCallback(() => { const item = resumeChoice.item; setResumeChoice(null); startCardVideo(item, false); }, [resumeChoice, startCardVideo]);
 
 	// A song or a channel plays as soon as it's picked, so only the rest wait for their screen to start them.
 	const handlePlayFromMenu = useCallback((item) => {
@@ -1045,9 +1078,10 @@ const AppContent = (props) => {
 	}, [navigateTo]);
 
 	const handleOpenSettings = useCallback(() => {
+        if (managedProfile === 'child') return;
 		setSettingsInitialView(null);
 		setShowSettingsPanel(true);
-	}, []);
+	}, [managedProfile]);
 
 	const handleOpenFriends = useCallback(() => {
 		setSettingsInitialView('friends');
@@ -1065,8 +1099,9 @@ const AppContent = (props) => {
 	}, [handleSelectItem]);
 
 	const handleOpenAccountModal = useCallback(() => {
-		setShowAccountModal(true);
-	}, []);
+        if (openProfiles) { openProfiles(); return; }
+        setShowAccountModal(true);
+    }, [openProfiles]);
 
 	const handleCloseAccountModal = useCallback(() => {
 		setShowAccountModal(false);
@@ -1182,6 +1217,7 @@ const AppContent = (props) => {
 	}, [navigateTo]);
 
 	const handleHome = useCallback(() => {
+        directGeneration.current++;
 		setPanelHistory([]);
 		setSelectedItem(null);
 		setSelectedLibrary(null);
@@ -1545,7 +1581,7 @@ const AppContent = (props) => {
 					onLiveTv={handleOpenLiveTv}
 					onDiscover={handleOpenSeerr}
 					onSyncPlay={settings.syncplayEnabled !== false ? openSyncPlay : undefined}
-					onSettings={handleOpenSettings}
+					onSettings={managedProfile === 'child' ? undefined : handleOpenSettings}
 					onSelectLibrary={handleSelectLibrary}
 					onUserMenu={handleOpenAccountModal}
 					onMessages={handleOpenServerMessages}
@@ -1564,14 +1600,14 @@ const AppContent = (props) => {
 					onLiveTv={handleOpenLiveTv}
 					onDiscover={handleOpenSeerr}
 					onSyncPlay={settings.syncplayEnabled !== false ? openSyncPlay : undefined}
-					onSettings={handleOpenSettings}
+					onSettings={managedProfile === 'child' ? undefined : handleOpenSettings}
 					onSelectLibrary={handleSelectLibrary}
 					onUserMenu={handleOpenAccountModal}
 					onMessages={handleOpenServerMessages}
 					onFriends={handleOpenFriends}
 				/>
 			) : null}
-			<ItemMenuProvider onPlay={handlePlayFromMenu} onOpenItem={handleSelectItem} backRef={itemMenuBackRef}>
+			<ItemMenuProvider onPlay={handlePlayFromMenu} onOpenItem={openItemDetails} backRef={itemMenuBackRef}>
 				<Suspense fallback={<PanelLoader />}>
 					<Panels index={panelIndex} noCloseButton noAnimation>
 						<Panel>
@@ -1632,7 +1668,7 @@ const AppContent = (props) => {
 							)}
 						</Panel>
 						<Panel>
-							{panelIndex === PANELS.SETTINGS && (
+							{panelIndex === PANELS.SETTINGS && managedProfile !== 'child' && (
 								<Settings
 									onBack={handleBack}
 									onLibrariesChanged={fetchLibraries}
@@ -1822,6 +1858,9 @@ const AppContent = (props) => {
 					</Panels>
 				</Suspense>
 			</ItemMenuProvider>
+            {resumeChoice && <ResumeDialog item={resumeChoice.item} ticks={resumeChoice.ticks}
+                onContinue={resumeSelected} onRestart={restartSelected} onCancel={closeResume} />}
+
 			<AccountModal
 				open={showAccountModal}
 				onClose={handleCloseAccountModal}
@@ -1918,7 +1957,7 @@ const AppContent = (props) => {
 				<SeasonalTheme theme={settings.seasonalTheme} density={settings.seasonalDensity} />
 			)}
 			<NoConnection />
-			<DebugOverlay />
+			{!managedProfile && <DebugOverlay />}
 			{connectionState !== 'connected' && isAuthenticated && (
 				<div className={css.connectionBanner}>
 					<span>{connectionState === 'reconnecting' ? $L('Reconnecting to server...') : $L('Lost connection to server')}</span>
@@ -1927,7 +1966,7 @@ const AppContent = (props) => {
 					)}
 				</div>
 			)}
-			{showSettingsPanel && (
+			{showSettingsPanel && managedProfile !== 'child' && (
 				<SettingsPanel
 					initialView={settingsInitialView}
 					onClose={handleCloseSettingsPanel}
@@ -1980,9 +2019,10 @@ export const localeStringsReady = Promise.all(
 	})
 );
 
+const AuthBoundary = familyEnrollment() ? FamilyAuthProvider : AuthProvider;
 const AppBase = (props) => (
-	<SettingsProvider>
-		<AuthProvider>
+    <AuthBoundary>
+        <SettingsProvider>
 			<SeerrProvider>
 				<AchievementsProvider>
 					<ServerMessagesProvider>
@@ -1992,8 +2032,8 @@ const AppBase = (props) => (
 					</ServerMessagesProvider>
 				</AchievementsProvider>
 			</SeerrProvider>
-		</AuthProvider>
-	</SettingsProvider>
+		</SettingsProvider>
+	</AuthBoundary>
 );
 
 const AppThemed = ThemeDecorator(AppBase);

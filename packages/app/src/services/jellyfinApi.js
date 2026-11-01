@@ -1,3 +1,4 @@
+import {familyEnrollment} from './familySession';
 import {setImageSession, authenticatedImageUrl} from '../utils/authenticatedImageUrl';
 import packageJson from '../../package.json';
 import {buildQueryString} from '../utils/urlCompat';
@@ -22,6 +23,7 @@ const {appName: APP_NAME, deviceName: DEVICE_NAME, tag: platformTag} = PLATFORM_
 let deviceId = null;
 let currentServer = null;
 let currentUser = null;
+let authEpoch = 0;
 let accessToken = null;
 let serverType = 'jellyfin';
 
@@ -67,6 +69,7 @@ export const getUserImageUrl = (serverUrl, userId, imageTag, type) =>
 	authenticatedImageUrl(buildUserImageUrl(serverUrl, userId, imageTag, type || serverType));
 
 export const setAuth = (userId, token) => {
+    authEpoch++;
 	currentUser = userId;
 	accessToken = token;
 	setImageSession(currentServer, accessToken, serverType);
@@ -191,6 +194,7 @@ const fetchWithTimeout = (url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) =>
 export const getDeviceId = () => deviceId;
 
 const request = async (endpoint, options = {}) => {
+    const epoch = authEpoch;
 	const url = `${currentServer}${trimQuerySeparator(endpoint)}`;
 	const parentId = parentIdOf(endpoint);
 	if (parentId && accessDeniedParentIds.has(parentId)) {
@@ -218,6 +222,7 @@ const request = async (endpoint, options = {}) => {
 		throw typed;
 	}
 
+    if (epoch !== authEpoch) throw new Error('Session changed');
 	if (!response.ok) {
 		if ((response.status === 401 || response.status === 403) && parentId) {
 			accessDeniedParentIds.add(parentId);
@@ -233,6 +238,7 @@ const request = async (endpoint, options = {}) => {
 	}
 
 	const text = await response.text();
+	if (epoch !== authEpoch) throw new Error('Session changed');
 	if (!text) return null;
 	return JSON.parse(text);
 };
@@ -966,6 +972,8 @@ export const createApiForServer = (serverUrl, token, userId, serverTypeOverride 
 	const serverUserRoutes = makeUserRoutes(() => serverTypeOverride, () => userId);
 
 	const serverRequest = async (endpoint, options = {}) => {
+        if (familyEnrollment() && token && token !== accessToken) throw new Error('Session changed');
+        const epoch = authEpoch;
 		const requestUrl = `${url}${trimQuerySeparator(endpoint)}`;
 		const deniedParentId = parentIdOf(endpoint);
 		const deniedKey = deniedParentId ? `${url}|${deniedParentId}` : null;
@@ -994,6 +1002,7 @@ export const createApiForServer = (serverUrl, token, userId, serverTypeOverride 
 			throw typed;
 		}
 
+        if (epoch !== authEpoch) throw new Error('Session changed');
 		if (!response.ok) {
 			if ((response.status === 401 || response.status === 403) && deniedKey) {
 				accessDeniedParentIds.add(deniedKey);
@@ -1009,6 +1018,7 @@ export const createApiForServer = (serverUrl, token, userId, serverTypeOverride 
 		}
 
 		const text = await response.text();
+		if (epoch !== authEpoch) throw new Error('Session changed');
 		if (!text) return null;
 		return JSON.parse(text);
 	};

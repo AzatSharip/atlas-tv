@@ -9,6 +9,7 @@ import {useState, useEffect, useRef} from 'react';
 
 const imageCache = new Map();
 const MAX_CACHE_SIZE = 100;
+let cacheEpoch = 0;
 
 // AbortController support check for older webOS (Chromium 38+)
 const hasAbortController = typeof AbortController !== 'undefined';
@@ -25,6 +26,7 @@ export const useProxiedImage = (originalUrl) => {
 	const isMountedRef = useRef(true);
 
 	useEffect(() => {
+        const epoch = cacheEpoch;
 		isMountedRef.current = true;
 		setLoading(true);
 
@@ -76,6 +78,7 @@ export const useProxiedImage = (originalUrl) => {
 				}
 
 				const blob = await response.blob();
+				if (epoch !== cacheEpoch) return;
 				const blobUrl = URL.createObjectURL(blob);
 
 				// Manage cache size
@@ -122,6 +125,7 @@ export const useProxiedImage = (originalUrl) => {
  * Clear the image cache and revoke all blob URLs
  */
 export const clearProxiedImageCache = () => {
+    cacheEpoch++;
 	for (const blobUrl of imageCache.values()) {
 		URL.revokeObjectURL(blobUrl);
 	}

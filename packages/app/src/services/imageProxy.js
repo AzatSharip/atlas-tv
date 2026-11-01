@@ -17,8 +17,10 @@ const MAX_CACHE_SIZE = 250;
  * @param {Object} options - Optional fetch options (headers, etc.)
  * @returns {Promise<string|null>} - Blob URL or null on failure
  */
+let cacheEpoch = 0;
 export const proxyImage = async (url, options = {}) => {
 	if (!url) return null;
+    const epoch = cacheEpoch;
 
 	// Return cached version if available
 	if (imageCache.has(url)) {
@@ -44,6 +46,7 @@ export const proxyImage = async (url, options = {}) => {
 			}
 
 			const blob = await response.blob();
+			if (epoch !== cacheEpoch) return null;
 			const blobUrl = URL.createObjectURL(blob);
 
 			// Manage cache size - remove oldest entries if needed
@@ -72,6 +75,7 @@ export const proxyImage = async (url, options = {}) => {
  * Clear the image cache and revoke all blob URLs
  */
 export const clearImageCache = () => {
+    cacheEpoch++;
 	for (const blobUrl of imageCache.values()) {
 		URL.revokeObjectURL(blobUrl);
 	}

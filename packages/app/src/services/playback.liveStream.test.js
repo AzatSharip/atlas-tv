@@ -168,3 +168,32 @@ describe('transcode preferences', () => {
 		expect(lastRequest()).toMatchObject({EnableDirectPlay: false, EnableDirectStream: true});
 	});
 });
+
+
+describe('resume preparation progress', () => {
+    test('exit during native preparation preserves the resume point', async () => {
+        answerMovie();
+        await playback.getPlaybackInfo(movie.Id, {item: movie, startPositionTicks: 19830000000});
+        playback.holdResumeProgress(19830000000);
+        await playback.reportStop(30000000);
+        expect(api.reportPlaybackStopped).toHaveBeenLastCalledWith(expect.objectContaining({PositionTicks: 19830000000}));
+    });
+    test('a completed resume permits a deliberate seek back to the beginning', async () => {
+        answerMovie();
+        await playback.getPlaybackInfo(movie.Id, {item: movie});
+        const confirm = playback.holdResumeProgress(19830000000);
+        confirm();
+        await playback.reportStop(0);
+        expect(api.reportPlaybackStopped).toHaveBeenLastCalledWith(expect.objectContaining({PositionTicks: 0}));
+    });
+    test('an old seek completion cannot clear a new session resume guard', async () => {
+        answerMovie();
+        await playback.getPlaybackInfo(movie.Id, {item: movie});
+        const confirmOld = playback.holdResumeProgress(100000000);
+        await playback.getPlaybackInfo(movie.Id, {item: movie});
+        playback.holdResumeProgress(200000000);
+        confirmOld();
+        await playback.reportStop(0);
+        expect(api.reportPlaybackStopped).toHaveBeenLastCalledWith(expect.objectContaining({PositionTicks: 200000000}));
+    });
+});

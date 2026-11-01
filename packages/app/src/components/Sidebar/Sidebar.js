@@ -187,7 +187,7 @@ const Sidebar = ({
 						<SidebarItem Icon={FriendsIcon} slot={nextSlot()} label={$L('Friends')} onClick={onFriends} spotlightId="navbar-friends" badge={friendsBadge} />
 					)}
 
-					<SidebarItem Icon={SettingsIcon} slot={nextSlot()} label={$L('Settings')} onClick={onSettings} spotlightId="navbar-settings" />
+					{onSettings && <SidebarItem Icon={SettingsIcon} slot={nextSlot()} label={$L('Settings')} onClick={onSettings} spotlightId="navbar-settings" />}
 				</div>
 			</div>
 

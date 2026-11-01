@@ -25,7 +25,8 @@ import {supportsAssRenderer, initAssCanvasRenderer, disposeAssRenderer, setAssTi
 import {getSubtitleOverlayStyle, getSubtitleTextStyle, sanitizeSubtitleHtml, resolveSubtitleStyleSettings} from '../../utils/subtitleConstants';
 import {isHdrOutput, findVideoStream} from '../../utils/videoRange';
 import {selectPreferredAudioStream} from '../../utils/audioTrackSelection';
-import {applyResumeRewind, skipBackSeconds, skipForwardSeconds, zoomInternalFromSetting, zoomSettingFromInternal} from '../../utils/playbackTuning';
+import {createSeekGesture, seekTarget} from '../../utils/seekGesture';
+import {applyResumeRewind, zoomInternalFromSetting, zoomSettingFromInternal} from '../../utils/playbackTuning';
 import {saveAudioPref, saveSubtitlePref} from '../../services/subtitlePrefs';
 import {resolveSeriesAudio} from './initialAudio';
 import {resolveInitialSubtitle} from './initialSubtitle';
@@ -634,6 +635,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	const openAndPrepare = useCallback(async ({url, playMethod: method, mediaSource, resumeTicks = 0, hasNativePendingSub = false, shouldAbort = null}) => {
 		const isHls = typeof url === 'string' && url.includes('.m3u8');
 		const isTranscode = method === playback.PlayMethod.Transcode;
+        const confirmResume = playback.holdResumeProgress(resumeTicks);
 
 		// opening against a playlist the server hasnt written yet errors out
 		// the whole pipeline, so wait for it to exist first
@@ -701,14 +703,16 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		// so the deferred resume seek must never fire before play is issued
 		let playIssued = false;
 
+        let deferredSeekPromise = null;
 		const runDeferredResumeSeek = () => {
 			if (!playIssued || shouldAbort?.()) return;
 			const ms = deferredResumeSeekRef.current;
-			if (ms == null) return;
+			if (ms == null) return deferredSeekPromise;
 			deferredResumeSeekRef.current = null;
-			avplaySeek(ms).catch((e) => {
-				console.warn('[Player] Deferred resume seek failed:', e?.message || e);
-			});
+            deferredSeekPromise = withTimeout(avplaySeek(ms), 15000);
+            // A buffering callback can start this before the await below.
+            deferredSeekPromise.catch(() => {});
+            return deferredSeekPromise;
 		};
 
 		avplaySetListener({
@@ -827,14 +831,20 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		}
 
 		if (deferredResumeSeekRef.current != null) {
-			setTimeout(runDeferredResumeSeek, 1500);
-		}
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            if (shouldAbort?.()) return;
+            await runDeferredResumeSeek();
+		} else if (deferredSeekPromise) {
+            await deferredSeekPromise;
+        }
 		if (postPlaySeekMs > 0) {
-			avplaySeek(postPlaySeekMs).catch((e) => {
-				console.warn('[Player] Post play resume seek failed:', e?.message || e);
-			});
+			// Do not report the preparation clock as the viewer's saved progress.
+			await withTimeout(avplaySeek(postPlaySeekMs), 15000);
+			if (shouldAbort?.()) return;
 		}
 
+        if (shouldAbort?.()) return;
+        confirmResume();
 		applyPendingTracksRef.current?.();
 
 		// one confirmation pass, some firmware silently drops selections made
@@ -2050,17 +2060,6 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		if (!landingScrubRef.current) setIsSeeking(false);
 	}, [groupSeekTo, noteSeek]);
 
-	const scheduleDeferredSeek = useCallback((targetMs) => {
-		pendingSeekMsRef.current = targetMs;
-		if (seekDebounceRef.current) {
-			clearTimeout(seekDebounceRef.current);
-		}
-		// A scrub that doesn't hold playback lands once the presses stop, and the preview goes with it.
-		seekDebounceRef.current = setTimeout(() => {
-			seekDebounceRef.current = null;
-			executeDeferredSeek();
-		}, 500);
-	}, [executeDeferredSeek]);
 
 	// Play during a held scrub is what commits it, landing on the scrubbed spot and playing on
 	// from there.
@@ -2134,25 +2133,25 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		noteViewerActivity();
 		dropScrub();
 		noteSeek();
-		const step = skipBackSeconds(settings);
+		const step = 15;
 		if (groupSeekTo(positionRef.current - step * 10000000)) return;
 		const ms = avplayGetCurrentTime();
 		const newMs = Math.max(0, ms - step * 1000);
 		avplaySeek(newMs).catch(e => console.warn('[Player] Seek failed:', e));
-	}, [settings, groupSeekTo, noteViewerActivity, dropScrub, noteSeek]);
+	}, [groupSeekTo, noteViewerActivity, dropScrub, noteSeek]);
 
 	const handleForward = useCallback(() => {
 		if (!avplayReadyRef.current) return;
 		noteViewerActivity();
 		dropScrub();
 		noteSeek();
-		const step = skipForwardSeconds(settings);
+		const step = 15;
 		if (groupSeekTo(positionRef.current + step * 10000000)) return;
 		const ms = avplayGetCurrentTime();
 		const durationMs = avplayGetDuration();
 		const newMs = Math.min(durationMs, ms + step * 1000);
 		avplaySeek(newMs).catch(e => console.warn('[Player] Seek failed:', e));
-	}, [settings, groupSeekTo, noteViewerActivity, dropScrub, noteSeek]);
+	}, [groupSeekTo, noteViewerActivity, dropScrub, noteSeek]);
 
 	// Modal handlers
 	const openModal = useCallback((modal) => {
@@ -2451,36 +2450,35 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 
 	// With a preview to look at, a scrub pauses playback so the preview holds still, and only play
 	// commits it. The viewer can turn that off, and without a preview playback carries on.
-	const beginScrub = useCallback(() => {
-		if (scrubHoldRef.current.active || settings.trickPlayPauseWhileScrubbing === false ||
-			settings.trickPlayMode === 'disabled' || isInGroup || !hasTrickplayPreview(item.Id, mediaSourceId)) return;
-		const wasPlaying = avplayGetState() === 'PLAYING';
-		scrubHoldRef.current = {active: true, wasPlaying};
-		if (wasPlaying) {
-			avplayPause();
-			setIsPaused(true);
-			healthMonitorRef.current?.setPaused(true);
-		}
-	}, [settings.trickPlayPauseWhileScrubbing, settings.trickPlayMode, isInGroup, item.Id, mediaSourceId]);
 
 	// One scrub step on from the pending target, or from where playback is when a scrub starts.
-	const scrubBy = useCallback((deltaSeconds) => {
+	const seekGestureRef = useRef(createSeekGesture());
+	const scrubBy = useCallback((direction) => {
 		if (!avplayReadyRef.current) return;
 		noteViewerActivity();
-		beginScrub();
+		const deltaSeconds = seekGestureRef.current.step(direction, Date.now());
 		setIsSeeking(true);
 		const baseMs = pendingSeekMsRef.current != null ? pendingSeekMsRef.current : avplayGetCurrentTime();
-		const newMs = Math.min(avplayGetDuration(), Math.max(0, baseMs + deltaSeconds * 1000));
+		const newMs = seekTarget(baseMs, deltaSeconds, avplayGetDuration());
 		setSeekPosition(Math.floor(newMs * 10000));
-		if (scrubHoldRef.current.active) pendingSeekMsRef.current = newMs;
-		else scheduleDeferredSeek(newMs);
-	}, [noteViewerActivity, beginScrub, scheduleDeferredSeek]);
+		pendingSeekMsRef.current = newMs;
+	}, [noteViewerActivity]);
+    useEffect(() => {
+        const gesture = seekGestureRef.current;
+        const release = e => {
+            if (e.keyCode !== 37 && e.keyCode !== 39 && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+            seekGestureRef.current.reset();
+            executeDeferredSeek();
+        };
+        window.addEventListener('keyup', release, true);
+        return () => { window.removeEventListener('keyup', release, true); gesture.reset(); };
+    }, [executeDeferredSeek]);
 
 	// Progress bar keyboard control - deferred seeking
 	const handleProgressKeyDown = useCallback((e) => {
 		if (!avplayReadyRef.current) return;
 		showControls();
-		const step = settings.seekStep;
+		const step = 1;
 
 		if (e.key === 'ArrowLeft' || e.keyCode === 37) {
 			e.preventDefault();
@@ -3018,7 +3016,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 					if (isLiveTV) { showControls(); return; }
 					showControls();
 					setFocusRow('progress');
-					scrubBy(key === 'ArrowLeft' || e.keyCode === 37 ? -settings.seekStep : settings.seekStep);
+					scrubBy(key === 'ArrowLeft' || e.keyCode === 37 ? -1 : 1);
 					return;
 				}
 				e.preventDefault();

@@ -5,6 +5,8 @@ import {initStorage, getFromStorage, saveToStorage, removeFromStorage} from '../
 import * as multiServerManager from '../services/multiServerManager';
 import {clearImageCache} from '../services/imageProxy';
 import {clearAnimeMarkerCache} from '../services/animeMarkersApi';
+import {clearMemoryCache, cancelPendingCacheSave} from '../views/Browse/browseCache';
+import serverLogger from '../services/serverLogger';
 import {resetLibraryScope} from '../services/libraryScope';
 import {resetBlockedContentGate} from '../services/blockedContentGate';
 import * as serverSocket from '../services/serverSocket';
@@ -33,7 +35,11 @@ const probeServer = async () => {
 };
 
 // Clear all memory caches - call on logout or server switch
-const clearAllCaches = () => {
+export const clearAllCaches = () => {
+    cancelPendingCacheSave();
+    clearMemoryCache();
+    serverLogger.setRecording(false);
+    serverLogger.clear();
 	clearImageCache();
 	clearProxiedImageCache();
 	// Verdicts are keyed by bare item id, so they would otherwise follow the user onto
@@ -45,7 +51,7 @@ const clearAllCaches = () => {
 	console.log('[AuthContext] All caches cleared');
 };
 
-const AuthContext = createContext(null);
+export const AuthContext = createContext(null);
 
 export const AuthProvider = ({children}) => {
 	const [isAuthenticated, setIsAuthenticated] = useState(false);

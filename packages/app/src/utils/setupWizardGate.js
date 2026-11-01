@@ -3,6 +3,7 @@
 // The app asks this after sign in, so shouldRun stays a storage read and
 // never touches the network. Anything slow happens inside the wizard itself.
 
+import {familyEnrollment} from '../services/familySession';
 import {getFromStorage, saveToStorage} from '../services/storage';
 
 // Bumped only when a release adds a step that earns its place. Everything
@@ -75,6 +76,7 @@ export const remainingSteps = () => {
 };
 
 export const shouldRun = async (serverId, serverUrl, userId) => {
+    if (familyEnrollment()) return false;
 	if (rerunning) return true;
 	if (deferredThisLaunch) return false;
 	const serverKey = serverKeyFor(serverId, serverUrl, userId);

@@ -244,7 +244,10 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 	const [imageType, setImageType] = useStorage(`library_imageType_${libraryId}`, isArchive ? 'thumbnail' : isSquareDefault ? 'square' : 'poster');
 	const [gridDirection, setGridDirection] = useStorage(`library_gridDirection_${libraryId}`, 'vertical');
 	const [storedGroupBy, setGroupBy] = useStorage(`library_groupBy_${libraryId}`, 'none');
-	const [folderView, setFolderView] = useStorage(`library_folderView_${libraryId}`, isArchive ? 'on' : 'off');
+	// A non-recursive movie library retains multi-video folders while Jellyfin
+	// still returns single-film directories as directly playable movies.
+	const [folderView, setFolderView] = useStorage(`library_folderView_${libraryId}`,
+		isArchive || library?.CollectionType?.toLowerCase() === 'movies' ? 'on' : 'off');
 	const [sortKey, setSortKey] = useStorage(`library_sortKey_${libraryId}`, 'SortName');
 	const [sortOrder, setSortOrder] = useStorage(`library_sortOrder_${libraryId}`, '');
 	const [searchQuery, setSearchQuery] = useState('');
@@ -452,7 +455,7 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 					newItems = newItems.filter(i => i.Type !== 'BoxSet');
 				}
 				if (generation !== fetchGenerationRef.current) return;
-				apiFetchIndexRef.current = append ? apiFetchIndexRef.current + newItems.length : newItems.length;
+				apiFetchIndexRef.current = result.AtlasNextIndex != null ? result.AtlasNextIndex : startIndex + (result.Items || []).length;
 				showPage(newItems);
 				setTotalCount(result.TotalRecordCount || 0);
 			} else {
@@ -553,6 +556,16 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 			loadItemsRef.current?.(apiFetchIndexRef.current, true);
 		}
 	}, [groupedActive, isLoading, totalCount, allItems.length]);
+
+    useEffect(() => {
+        if (!isArchive) return undefined;
+        const refresh = () => {
+            if (!document.hidden && !loadingMoreRef.current) loadItemsRef.current?.(0, false);
+        };
+        const timer = setInterval(refresh, 60000);
+        window.addEventListener('moonfin:browseRefresh', refresh);
+        return () => { clearInterval(timer); window.removeEventListener('moonfin:browseRefresh', refresh); };
+    }, [isArchive]);
 
 	// The summary cant tell music from audiobooks or music videos from movies, so
 	// those playlists are read once and remembered. A small batch at a time keeps
@@ -961,9 +974,10 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 	const isSquareImage = effectiveImageType === 'square';
 	// A square and a poster share an image height and differ only in width, while
 	// a thumbnail is sized off its own shorter height.
-	const posterHeight = isArchive ? 128 : isWideImage
+	const movieScale = !isArchive && library?.CollectionType === 'movies' ? 1.2 : 1;
+	const posterHeight = isArchive ? 128 : movieScale * (isWideImage
 		? ({small: 128, medium: 160, large: 191, extraLarge: 223}[imageSize] || 160)
-		: ({small: 174, medium: 217, large: 261, extraLarge: 304}[imageSize] || 217);
+		: ({small: 174, medium: 217, large: 261, extraLarge: 304}[imageSize] || 217));
 
 	// A subtitle anywhere in the library makes room for a second line on every
 	// card, so the rows stay level whether or not a given item has one.
@@ -978,8 +992,8 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 	const cardWidth = isSquareImage
 		? posterHeight
 		: isWideImage
-			? ({small: 227, medium: 284, large: 340, extraLarge: 397}[imageSize] || 284)
-			: ({small: 116, medium: 145, large: 174, extraLarge: 203}[imageSize] || 145);
+			? movieScale * ({small: 227, medium: 284, large: 340, extraLarge: 397}[imageSize] || 284)
+			: movieScale * ({small: 116, medium: 145, large: 174, extraLarge: 203}[imageSize] || 145);
 	const cardHeight = posterHeight + textHeight;
 
 	const cellPadX = horizontalCellPad(cardWidth, window.innerWidth - GRID_INSET);

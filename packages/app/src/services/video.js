@@ -67,3 +67,11 @@ export const setupPlatformLifecycle = (onRelaunch) => {
 		remove?.();
 	};
 };
+
+// Profile boundaries must stop the native layer before a backgrounded React tree can render again.
+export const stopProfilePlayback = () => {
+    const ticks = impl?.avplayGetCurrentTime ? Math.floor(impl.avplayGetCurrentTime() * 10000) : null;
+    impl?.cleanupAVPlay?.();
+    if (typeof document !== 'undefined') document.querySelectorAll('video').forEach(video => impl?.cleanupVideoElement?.(video));
+    return ticks;
+};

@@ -44,6 +44,18 @@ let currentSession = null;
 let progressInterval = null;
 let healthMonitor = null;
 
+// Until the native player reaches a resume target, its zero-based preparation
+// clock must never replace the viewer's saved position (including exit/background).
+export const holdResumeProgress = ticks => {
+    const session = currentSession;
+    if (session) session.pendingResumeTicks = ticks > 0 ? ticks : null;
+    return () => {
+        if (currentSession === session && session) session.pendingResumeTicks = null;
+    };
+};
+const reportPosition = (session, ticks) => session?.pendingResumeTicks ?? ticks;
+
+
 const apiForSession = (session) => (session.serverCredentials
 	? jellyfinApi.createApiForServer(
 		session.serverCredentials.serverUrl,
@@ -1186,6 +1198,7 @@ const volumeReport = () => {
 // says which stream it held.
 const stopRequest = (positionTicks) => {
 	if (!currentSession) return null;
+    positionTicks = reportPosition(currentSession, positionTicks);
 
 	const creds = currentSession.serverCredentials;
 	let serverUrl = creds?.serverUrl || jellyfinApi.getServerUrl();
@@ -1230,6 +1243,7 @@ const shareStopWithShell = (positionTicks) => {
 
 export const reportStart = async (positionTicks = 0) => {
 	if (!currentSession) return;
+    positionTicks = reportPosition(currentSession, positionTicks);
 
 	try {
 		// Use session's server credentials for cross-server support
@@ -1259,6 +1273,8 @@ export const reportStart = async (positionTicks = 0) => {
 
 export const reportProgress = async (positionTicks, options = {}) => {
 	if (!currentSession) return;
+    positionTicks = reportPosition(currentSession, positionTicks);
+    currentSession.positionTicks = positionTicks;
 
 	try {
 		// Use session's server credentials for cross-server support
@@ -1374,6 +1390,7 @@ export const reportStop = async (positionTicks) => {
 	// this stop is in flight keeps it, and nothing reports on this one in the meantime.
 	const session = currentSession;
 	if (!session) return;
+    positionTicks = reportPosition(session, positionTicks);
 	currentSession = null;
 	shareStopWithShell(null);
 

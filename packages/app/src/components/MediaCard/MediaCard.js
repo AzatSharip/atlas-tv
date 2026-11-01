@@ -241,7 +241,10 @@ const MediaCard = ({item, serverUrl, cardType = 'portrait', rowImageType = 'post
 
 	const sizeMultiplier = POSTER_SIZE_MULTIPLIERS[settings.homeRowsPosterSize] || 1;
 	const shapeKey = isBanner ? 'banner' : isLandscape ? 'landscape' : isSquare ? 'square' : 'portrait';
-	const {width: cardWidth, height: cardHeight} = classicCardSize(shapeKey, settings.homeRowsPosterSize);
+	const baseSize = classicCardSize(shapeKey, settings.homeRowsPosterSize);
+    const movieScale = item.Type === 'Movie' ? 1.2 : 1;
+    const cardWidth = Math.round(baseSize.width * movieScale);
+    const cardHeight = Math.round(baseSize.height * movieScale);
 	// The genre name grows with the card so it reads on a poster and on a
 	// focused thumbnail alike, and the seerr genre cards use the same scale.
 	const genreLabelSize = Math.min(24, Math.max(14, cardWidth * (14 / 200)));

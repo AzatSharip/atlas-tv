@@ -56,3 +56,7 @@ certificates/
 /Torrents/
 /media
 /ТОРРЕНТЫ.md
+
+# Python profile broker runtime bytecode
+__pycache__/
+*.pyc

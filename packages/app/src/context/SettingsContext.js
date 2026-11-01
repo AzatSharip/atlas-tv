@@ -1,3 +1,5 @@
+import {familyRole} from '../services/familySession';
+import {familySettings} from '../utils/familySettings';
 import {createContext, useContext, useState, useEffect, useCallback, useMemo, useRef} from 'react';
 import {getFromStorage, saveToStorage} from '../services/storage';
 import {getMoonfinSettings, getMoonfinThemes, saveMoonfinProfile, moonfinPing} from '../services/seerrApi';
@@ -499,7 +501,7 @@ const persistBootLocale = (locale) => {
 };
 
 export function SettingsProvider({children}) {
-	const [settings, setSettings] = useState(defaultSettings);
+	const [settings, setSettings] = useState(() => familySettings(defaultSettings, familyRole()));
 	const [loaded, setLoaded] = useState(false);
 	// True once the login sync has finished, whichever way it went. The setup
 	// wizard waits on this so the answers it collects dont get overwritten by a
@@ -1045,9 +1047,10 @@ export function SettingsProvider({children}) {
 		}
 	}, [syncFromServer, updateSetting]);
 
+    const effectiveSettings = useMemo(() => familySettings(settings, familyRole()), [settings]);
 	return (
 		<SettingsContext.Provider value={{
-			settings,
+			settings: effectiveSettings,
 			loaded,
 			initialSyncSettled,
 			availableThemes,
@@ -1063,7 +1066,8 @@ export function SettingsProvider({children}) {
 			saveStoreTheme,
 			deleteStoreTheme
 		}}>
-			{children}
+			{/* Descendant mount effects must not overwrite preferences before hydration. */}
+			{loaded ? children : null}
 		</SettingsContext.Provider>
 	);
 }

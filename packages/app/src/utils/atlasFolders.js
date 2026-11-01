@@ -15,9 +15,49 @@
         try { root.sessionStorage.setItem('atlas_folder_' + id, JSON.stringify(stack)); }
         catch (_) { /* Session-memory storage may be unavailable; viewing still works. */ }
     }
-    function list(id, api, params) {
-        if (isArchive(id)) contexts[id] = {api: api, params: Object.assign({}, params)};
-        return api.getItems(params);
+    let presence = {}, epoch = 0;
+    function reset() {
+        epoch++; presence = {}; contexts = {}; selection = null; archives = {};
+        root.AtlasFolders.preferRemuxMov = false;
+        try {
+            Object.keys(root.sessionStorage).filter(k => k.indexOf('atlas_folder_') === 0)
+                .forEach(k => root.sessionStorage.removeItem(k));
+        } catch (_) { /* Storage is optional. */ }
+    }
+    async function hasVideo(api, folder) {
+        const cached = presence[folder.Id];
+        if (cached && Date.now() - cached.at < 30000) return cached.value;
+        try {
+            const result = await api.getItems({ParentId: folder.Id, Recursive: true,
+                MediaTypes: 'Video', IsFolder: false, Limit: 1, EnableTotalRecordCount: true});
+            // A partial or malformed response is not evidence of an empty branch.
+            const value = !(Array.isArray(result.Items) && result.TotalRecordCount === 0 &&
+                result.Items.length === 0);
+            presence[folder.Id] = {at: Date.now(), value: value};
+            return value;
+        } catch (_) { return true; }
+    }
+    async function list(id, api, params) {
+        if (!isArchive(id)) return api.getItems(params);
+        contexts[id] = {api: api, params: Object.assign({}, params)};
+        const generation = epoch;
+        let offset = params.StartIndex || 0;
+        // Skip empty pages without letting filtered counts corrupt the server offset.
+        for (;;) {
+            const result = await api.getItems(Object.assign({}, params, {StartIndex: offset}));
+            const batch = result.Items || [], visible = [];
+            for (let start = 0; start < batch.length; start += 4) {
+                const group = batch.slice(start, start + 4);
+                const keep = await Promise.all(group.map(item => item.IsFolder
+                    ? hasVideo(api, item) : Promise.resolve(item.MediaType === 'Video' || item.Type === 'Video')));
+                group.forEach((item, i) => { if (keep[i]) visible.push(item); });
+            }
+            if (generation !== epoch) throw new Error('Archive session changed');
+            offset += batch.length;
+            if (visible.length || !batch.length || offset >= result.TotalRecordCount || batch.length < (params.Limit || 150)) {
+                return Object.assign({}, result, {Items: visible, AtlasNextIndex: offset});
+            }
+        }
     }
     function select(id, item, search) {
         selection = isArchive(id) && item.Type === 'Video' && !item.IsFolder && contexts[id]
@@ -89,7 +129,7 @@
         let stream = source && (source.MediaStreams || []).find(function(s) { return s.Type === 'Video'; });
         return rotated(stream, transcoding) && original > 0 ? 1 / original : original;
     }
-    let adapter = {register: register, restore: restore, save: save, list: list, select: select, play: play,
+    let adapter = {reset: reset, register: register, restore: restore, save: save, list: list, select: select, play: play,
         streamWidth: streamWidth, streamHeight: streamHeight, displayAspect: displayAspect,
         matches: matches, isArchive: isArchive};
     root.AtlasFolders = adapter;

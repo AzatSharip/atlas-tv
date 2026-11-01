@@ -10,10 +10,10 @@ export const isStaticLibraryCard = (isLibraryRow, settings) =>
 
 // Worked out together because a tile held static sits at the width a card grows
 // to on focus, which is what lines the row up with the ones around it.
-export const modernCardMetrics = ({posterSize, platform, isSquareItem, isStatic}) => {
+export const modernCardMetrics = ({posterSize, platform, isSquareItem, isStatic, isMovie = false}) => {
 	// Leave room for three static library tiles and their gutters on a 1080p TV.
 	const baseHeight = isStatic && platform === 'tizen' ? 320 : 360;
-	const imageHeight = Math.round(baseHeight * (POSTER_SIZE_MULTIPLIERS[posterSize] || 1));
+	const imageHeight = Math.round(baseHeight * (POSTER_SIZE_MULTIPLIERS[posterSize] || 1) * (isMovie && !isStatic ? 1.2 : 1));
 	const expandedWidth = Math.round(imageHeight * (platform === 'tizen' ? 16 / 9 : 1.65));
 	const posterWidth = isSquareItem ? imageHeight : Math.round((imageHeight * 2) / 3);
 
