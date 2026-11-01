@@ -100,6 +100,14 @@ describe('the automatic bitrate', () => {
 	});
 });
 
+test('an abandoned file recovery cannot replace the current session', async () => {
+	getDeviceCapabilities.mockResolvedValue({});
+	await playback.getPlaybackInfo(movie.Id, {item: movie});
+	const active = playback.getCurrentSession();
+	await expect(playback.getPlaybackInfo('old-file', {shouldAbort: () => true})).rejects.toThrow('cancelled');
+	expect(playback.getCurrentSession()).toBe(active);
+});
+
 describe('frames that never reach the screen', () => {
 	let now;
 	let monitor;

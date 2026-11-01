@@ -17,4 +17,6 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: node scripts/test-atlas-folders.cjs
+      - name: Playback and authenticated artwork regression tests
+        run: npm test -w @moonfin/app -- --runInBand --watch=false --silent src/views/Player/vodRecovery.test.js src/services/playback.capabilities.test.js src/services/playback.liveStream.test.js src/views/Player/useLiveRecovery.test.js src/services/linkBitrate.test.js src/utils/authenticatedImageUrl.test.js
       - run: npm run build:tizen:oblong -- --skip-tizen-cli

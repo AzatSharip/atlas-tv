@@ -49,6 +49,7 @@ import SkipSegmentOverlay from './SkipSegmentOverlay';
 import StillWatchingDialog from './StillWatchingDialog';
 import useBufferingAnimation from './useBufferingAnimation';
 import useLiveRecovery, {reopenLiveChannel} from './useLiveRecovery';
+import {createVodRecovery, fileReopenOptions} from './vodRecovery';
 import LiveFailedCard from './LiveFailedCard';
 import LoadingAnimationLayer from '../../components/LoadingAnimation';
 import {
@@ -275,6 +276,9 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	const suspendedRef = useRef(null);
 	const loadGenerationRef = useRef(0);
 	const reloadPlaybackRef = useRef(null);
+	const vodRecoveryRef = useRef(null);
+	const recoveryAllowedRef = useRef(false);
+	recoveryAllowedRef.current = !isLiveTV && !isInGroup && !isPaused && !isSeeking && !error;
 	// re-arms server reporting when playback resumes after a background stop
 	const resumeReportingRef = useRef(null);
 	// index of a subtitle the server is currently burning into the stream
@@ -409,9 +413,13 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	timeUpdateLogicRef.current = () => {
 		if (!avplayReadyRef.current) return;
 		const state = avplayGetState();
-		if (state !== 'PLAYING' && state !== 'PAUSED') return;
-
 		const ms = avplayGetCurrentTime();
+		vodRecoveryRef.current?.observe({
+			positionMs: ms, durationMs: runTimeRef.current / 10000,
+			blocked: !recoveryAllowedRef.current || document.hidden || isLoading ||
+				state === 'PAUSED' || state === 'NONE' || !!landingScrubRef.current
+		});
+		if (state !== 'PLAYING' && state !== 'PAUSED') return;
 		const time = ms / 1000;
 		const ticks = Math.floor(ms * 10000);
 
@@ -634,6 +642,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 			if (shouldAbort?.()) return;
 		}
 
+		if (shouldAbort?.()) return;
 		avplayOpen(url);
 		currentUrlRef.current = url;
 		applyDisplayWindow();
@@ -693,7 +702,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		let playIssued = false;
 
 		const runDeferredResumeSeek = () => {
-			if (!playIssued) return;
+			if (!playIssued || shouldAbort?.()) return;
 			const ms = deferredResumeSeekRef.current;
 			if (ms == null) return;
 			deferredResumeSeekRef.current = null;
@@ -768,6 +777,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		} finally {
 			clearTimeout(prepareTimer);
 		}
+		if (shouldAbort?.()) return;
 		avplayReadyRef.current = true;
 
 		// some firmware resets display state during prepare
@@ -794,6 +804,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 			await new Promise((resolve) => setTimeout(resolve, startDelayMs));
 		}
 
+		if (shouldAbort?.()) return;
 		playIssued = true;
 		playbackMovingRef.current = false;
 		playIssuedAtRef.current = Date.now();
@@ -853,20 +864,23 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 			url,
 			playMethod: options.playMethod || session?.playMethod,
 			mediaSource: options.mediaSource || session?.mediaSource,
-			resumeTicks: seekPositionTicks
+			resumeTicks: seekPositionTicks,
+			shouldAbort: options.shouldAbort
 		});
-
+		if (options.shouldAbort?.()) return false;
 		startTimeUpdatePolling();
+		return true;
 	}, [startTimeUpdatePolling, stopTimeUpdatePolling, openAndPrepare]);
 
 	// every stream reload restarts playback and session reporting the same way
-	const restartFromResult = useCallback(async (result, positionTicks) => {
-		if (!result?.url) return false;
+	const restartFromResult = useCallback(async (result, positionTicks, shouldAbort) => {
+		if (!result?.url || shouldAbort?.()) return false;
 		positionRef.current = positionTicks;
 		if (result.playMethod) setPlayMethod(result.playMethod);
 		setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
 		if (result.playSessionId) playSessionRef.current = result.playSessionId;
-		await startAVPlayback(result.url, positionTicks, {playMethod: result.playMethod, mediaSource: result.mediaSource});
+		const started = await startAVPlayback(result.url, positionTicks, {playMethod: result.playMethod, mediaSource: result.mediaSource, shouldAbort});
+		if (!started || shouldAbort?.()) return false;
 		playback.reportStart(positionRef.current);
 		playback.startProgressReporting(
 			() => positionRef.current,
@@ -953,6 +967,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 				},
 				() => {
 					console.log('[Player] App backgrounded - suspending and saving progress');
+					vodRecoveryRef.current?.hold();
 					// Script freezes as soon as the app is backgrounded and a kill
 					// while suspended runs nothing at all, so the stop has to go out
 					// right now. It also records the resume position. Coming back
@@ -1032,10 +1047,25 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		};
 	}, [reassertNativeSubtitle]);
 
-	// Handle playback health issues
-	const handleUnhealthy = useCallback(async () => {
-		console.log('[Player] Playback unhealthy, falling back to transcode');
+	// File recovery watches the native position, including audio-only HLS.
+	// It shares one lock with native errors and never forces software encoding.
+	if (!vodRecoveryRef.current) {
+		vodRecoveryRef.current = createVodRecovery({
+			reopen: isCurrent => reloadPlaybackRef.current?.(isCurrent),
+			onFailed: () => {
+				stopTimeUpdatePolling();
+				setError($L('Playback failed. The file format may not be supported.'));
+			}
+		});
+	}
+	const handleUnhealthy = useCallback(() => {
+		// The generic monitor is not position-aware on AVPlay. The file watchdog
+		// and the separate live-channel recovery own decisions on this platform.
 	}, []);
+
+	useEffect(() => {
+		if (isPaused || isSeeking || isInGroup) vodRecoveryRef.current?.hold();
+	}, [isPaused, isSeeking, isInGroup]);
 
 	// Re-report start and restart the reporting loops on the existing session
 	// when playback resumes after a background stop already reported it ended.
@@ -1215,8 +1245,9 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	// Load Media & Start AVPlay
 	// ==============================
 	useEffect(() => {
+		const generation = ++loadGenerationRef.current;
 		const loadMedia = async () => {
-			const generation = ++loadGenerationRef.current;
+			vodRecoveryRef.current?.begin();
 			const stillCurrent = () => generation === loadGenerationRef.current;
 			setIsLoading(true);
 			setError(null);
@@ -1600,6 +1631,8 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		loadMedia();
 
 		return () => {
+			loadGenerationRef.current = generation + 1;
+			vodRecoveryRef.current?.stop();
 			// Report stop whenever a session is still open. A normal back-out has
 			// already stopped and cleared it. Don't gate on position, live TV and
 			// freshly opened media sit at 0 and would otherwise leak.
@@ -1821,6 +1854,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	// Playback Event Handlers (via AVPlay listener refs)
 	// ==============================
 	const handleEnded = useCallback(async () => {
+		vodRecoveryRef.current?.stop();
 		// A live stream has no end, so reaching one means the source starved.
 		if (liveRecovery) {
 			liveRecovery.recover('completed');
@@ -1852,6 +1886,11 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 
 	const handleError = useCallback(async () => {
 		console.error('[Player] Playback error');
+		if (vodRecoveryRef.current?.busy()) return;
+		if (!isLiveTV && hasPlayedRef.current && recoveryAllowedRef.current && !document.hidden) {
+			await vodRecoveryRef.current?.recover();
+			return;
+		}
 
 		// A channel past its tune is the live recovery's to bring back.
 		if (liveRecovery?.engaged()) {
@@ -1909,26 +1948,31 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		}
 
 		setError($L('Playback failed. The file format may not be supported.'));
-	}, [hasTriedTranscode, playMethod, item, selectedQuality, settings.maxBitrate, settings.stereoUpmixEnabled, restartFromResult, mediaSourceId, videoQueue, onPlayNext, liveRecovery]);
+	}, [hasTriedTranscode, playMethod, item, selectedQuality, settings.maxBitrate, settings.stereoUpmixEnabled, restartFromResult, mediaSourceId, videoQueue, onPlayNext, liveRecovery, isLiveTV]);
 
 	// Reload the current item from its last position, used when a suspended
 	// session cant be restored after the app returns to the foreground
-	const reloadCurrentPlayback = useCallback(async () => {
+	const reloadCurrentPlayback = useCallback(async (recoveryIsCurrent) => {
+		const generation = loadGenerationRef.current;
+		const positionTicks = positionRef.current;
+		const shouldAbort = () => generation !== loadGenerationRef.current ||
+			(recoveryIsCurrent && (!recoveryIsCurrent() || !recoveryAllowedRef.current || document.hidden));
 		try {
+			if (shouldAbort()) return false;
 			const result = await playback.getPlaybackInfo(item.Id, {
-				startPositionTicks: positionRef.current,
-				maxBitrate: selectedQuality || settings.maxBitrate,
-				mediaSourceId,
-				audioStreamIndex: selectedAudioIndex != null ? selectedAudioIndex : undefined,
-				item,
-				stereoUpmixEnabled: settings.stereoUpmixEnabled
+				...fileReopenOptions({positionTicks, session: playback.getCurrentSession(),
+					audioIndex: selectedAudioIndex, subtitleIndex: selectedSubtitleIndex,
+					item, maxBitrate: selectedQuality || settings.maxBitrate,
+					stereoUpmixEnabled: settings.stereoUpmixEnabled, directAllowed}),
+				shouldAbort
 			});
-			return await restartFromResult(result, positionRef.current);
+			if (shouldAbort()) return false;
+			return await restartFromResult(result, positionTicks, shouldAbort);
 		} catch (err) {
 			console.error('[Player] Stream reload failed:', err);
 			return false;
 		}
-	}, [item, selectedQuality, settings.maxBitrate, settings.stereoUpmixEnabled, mediaSourceId, selectedAudioIndex, restartFromResult]);
+	}, [item, selectedQuality, settings.maxBitrate, settings.stereoUpmixEnabled, selectedAudioIndex, selectedSubtitleIndex, directAllowed, restartFromResult]);
 
 	// Keep callback refs in sync
 	handleEndedCallbackRef.current = handleEnded;
@@ -1939,6 +1983,8 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	// Control Actions (AVPlay-based)
 	// ==============================
 	const teardownPlayback = useCallback(async () => {
+		++loadGenerationRef.current;
+		vodRecoveryRef.current?.stop();
 		cancelNextEpisodeCountdown();
 		stopTimeUpdatePolling();
 		await playback.reportStop(positionRef.current);

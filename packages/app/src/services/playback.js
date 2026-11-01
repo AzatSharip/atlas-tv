@@ -792,6 +792,10 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 	const subtitleStreams = extractSubtitleStreams(mediaSource, itemId, creds, storedSettings.assDirectPlay === false, url, playMethod);
 	const chapters = extractChapters(mediaSource);
 
+	// A file recovery can outlive Back or a new selection. Do not replace
+	// the new session with the response to an abandoned negotiation.
+	if (options.shouldAbort?.()) throw new Error('Playback request cancelled');
+
 	const audioOnlyRemux = playMethod === PlayMethod.Transcode && isAudioOnlyRemuxTranscode(mediaSource);
 	const reportedPlayMethod = audioOnlyRemux ? PlayMethod.DirectStream : playMethod;
 
