@@ -777,7 +777,8 @@ const AppContent = (props) => {
 					if (backHandlerRef.current?.()) return;
 					// Another client pressing back never closes the app on the viewer.
 					if (e.fromRemote) return;
-					if (settings.exitConfirmation === false) {
+					// Tizen Back only navigates; exiting requires an explicit dialog action.
+					if (!isTizen() && settings.exitConfirmation === false) {
 						performAppCleanup();
 						exitApp();
 					} else {

@@ -1137,8 +1137,10 @@ export const createApiForServer = (serverUrl, token, userId, serverTypeOverride 
 		getEpisodes: (seriesId, seasonId = null) =>
 			serverRequest(`/Shows/${seriesId}/Episodes?UserId=${userId}${seasonId ? `&SeasonId=${seasonId}` : ''}&Fields=Overview,PrimaryImageAspectRatio,MediaSources,MediaStreams,LocationType`),
 
-		getPlaybackInfo: (itemId) =>
-			serverRequest(`/Items/${itemId}/PlaybackInfo?UserId=${userId}`, {timeoutMs: PLAYBACK_TIMEOUT_MS}),
+		getPlaybackInfo: (itemId, body = {}) =>
+			serverRequest(`/Items/${itemId}/PlaybackInfo?UserId=${userId}`, {
+				method: 'POST', body: {UserId: userId, ...body}, timeoutMs: PLAYBACK_TIMEOUT_MS
+			}),
 
 		getLocalTrailers: (itemId) =>
 			serverRequest(`/Items/${itemId}/LocalTrailers?userId=${userId}`),

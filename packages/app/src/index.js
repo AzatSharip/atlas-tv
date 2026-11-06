@@ -10,6 +10,7 @@ import {createRoot, hydrateRoot} from 'react-dom/client';
 import App, {localeStringsReady} from './App';
 import {isTizen} from './platform';
 import {registerKeys, ESSENTIAL_KEY_NAMES} from './utils/keys';
+import {installBackKeyGuard} from './utils/backKeyGuard';
 
 const enforceTizenViewport = () => {
 	if (typeof document === 'undefined' || !isTizen()) return;
@@ -87,6 +88,7 @@ if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
 })();
 
 if (isTizen()) {
+	installBackKeyGuard();
 	enforceTizenViewport();
 	registerKeys(ESSENTIAL_KEY_NAMES);
 }

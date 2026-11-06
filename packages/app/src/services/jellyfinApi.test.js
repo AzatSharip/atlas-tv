@@ -1,4 +1,4 @@
-import {api, setServer, setServerType, setAuth, resolveItemsByProviderIds, resetLibraryIndexForTests} from './jellyfinApi';
+import {api, createApiForServer, setServer, setServerType, setAuth, resolveItemsByProviderIds, resetLibraryIndexForTests} from './jellyfinApi';
 import {platformFetch} from './secureFetch';
 
 jest.mock('./secureFetch', () => ({platformFetch: jest.fn()}));
@@ -16,6 +16,18 @@ beforeAll(() => {
 });
 // The runner resets every mock between tests, implementation included.
 beforeEach(empty);
+
+test('cross-server playback forwards HLS profile, source, tracks, bitrate and resume as POST', async () => {
+	const remote = createApiForServer('https://example.test', 'fixture', 'remote-user');
+	const body = {EnableDirectPlay: false, EnableDirectStream: true, MaxStreamingBitrate: 30000000,
+		MediaSourceId: 'source-a', StartTimeTicks: 150000000, AudioStreamIndex: 1, SubtitleStreamIndex: -1,
+		DeviceProfile: {TranscodingProfiles: [{Type: 'Video', Protocol: 'hls', VideoCodec: 'h264'}]}};
+	await remote.getPlaybackInfo('synthetic-video', body);
+	const [url, request] = platformFetch.mock.calls.at(-1);
+	expect(url).toContain('/Items/synthetic-video/PlaybackInfo?UserId=remote-user');
+	expect(request.method).toBe('POST');
+	expect(JSON.parse(request.body)).toEqual({UserId: 'remote-user', ...body});
+});
 
 describe('Next Up', () => {
 	test('asks Emby for its legacy list and nothing else', async () => {

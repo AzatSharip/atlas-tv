@@ -34,19 +34,25 @@ function setup() {
   }};
   await a.list(id, api, {ParentId: 'iphone', StartIndex: 150, Limit: 150, SortOrder: 'Ascending'});
   a.select(id, all[155]);
+  assert.equal(a.returnFocusIndex(id, 'iphone', all.slice(0, 150)), -1); // Load later pages before restoring focus.
+  assert.equal(a.returnFocusIndex(id, 'iphone', all), 155);
+  assert.equal(a.returnFocusIndex(id, 'other-folder', all), null);
+  assert.equal(a.returnFocusIndex('other-home-videos', 'iphone', all), null);
   let played;
   await a.play(all[155], {audioIndex: 2}, o => played = o);
   assert.equal(played.audioIndex, 2);
   assert.equal(played.videoQueue[0].Id, '155');
   assert.equal(played.videoQueue.at(-1).Id, '319');
   assert.equal(played.videoQueue.length, 163);
+  assert.equal(a.returnFocusIndex(id, 'iphone', all), 155); // Queue creation does not consume return focus.
+  a.clearReturnFocus();
+  assert.equal(a.returnFocusIndex(id, 'iphone', all), null);
   assert.ok(!played.videoQueue.some(v => v.Id === 'metadata-only'));
-  assert.equal(a.preferRemuxMov, true);
   for (const rotation of [-90, 90, 270]) {
     const portrait = {Type: 'Video', Width: 1920, Height: 1080, Rotation: rotation};
-    assert.equal(a.streamWidth(portrait, true), 1080);
-    assert.equal(a.streamHeight(portrait, true), 1920);
-    assert.equal(a.displayAspect({MediaStreams: [portrait]}, 16/9, true), 9/16);
+    assert.equal(a.streamWidth(portrait, true, true), 1080);
+    assert.equal(a.streamHeight(portrait, true, true), 1920);
+    assert.equal(a.displayAspect({MediaStreams: [portrait]}, 16/9, true, true), 9/16);
     assert.equal(a.streamWidth(portrait, false), 1920);
     assert.equal(a.displayAspect({MediaStreams: [portrait]}, 16/9, false), 16/9);
   }
@@ -65,7 +71,7 @@ function setup() {
   a.select('movies', all[155]);
   await a.play(all[155], null, o => played = o);
   assert.equal(played, null); // Ordinary films remain ordinary films.
-  assert.equal(a.preferRemuxMov, false);
+  a.preferRemuxMov = true; // Legacy/debug globals no longer select transport or rotation.
   assert.equal(a.streamWidth({Width:1920, Height:1080, Rotation:-90}, true), 1920);
   assert.equal(a.displayAspect({MediaStreams:[{Type:'Video',Rotation:-90}]}, 16/9, true), 16/9);
   a.select(id, all[155]);
@@ -78,5 +84,22 @@ function setup() {
   await a.play(all[155], null, () => starts++);
   assert.equal(starts, 1);
   assert.equal(alerts.length, 2); // Metadata-only and missing-item messages.
+  a.select(id, all[155]);
+  a.reset();
+  assert.equal(a.returnFocusIndex(id, 'empty', all), null); // No focus identity survives a profile switch.
+  // A queue fetch from the previous profile must not start playback or show an error.
+  const fresh = setup().a;
+  let finishQueue;
+  let pageCalls = 0;
+  await fresh.list(id, {getItems: async () => ++pageCalls === 1
+    ? {Items: [all[155]], TotalRecordCount: 1}
+    : new Promise(resolve => { finishQueue = resolve; })}, {ParentId: 'synthetic-folder'});
+  fresh.select(id, all[155]);
+  let lateStarts = 0;
+  const pending = fresh.play(all[155], null, () => lateStarts++);
+  fresh.reset();
+  finishQueue({Items: [all[155]], TotalRecordCount: 1});
+  await pending;
+  assert.equal(lateStarts, 0);
   console.log('PASS: folder restore/back, 320-item pagination, selected-start, folder/photo exclusion, last-item stop, movie isolation, explicit playlist, missing-item fallback');
 })().catch(e => {console.error(e); process.exitCode = 1;});

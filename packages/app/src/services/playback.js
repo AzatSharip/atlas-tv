@@ -11,6 +11,7 @@ import {videoRangeTypeOf} from '../utils/videoRange';
 import {getVolumeState, lastVolumeState} from './systemVolume';
 import {loadShellBridge} from './shellBridge';
 import {linkBitrate} from './linkBitrate';
+import {resolveHomeVideoHls, homeVideoHlsProfile, isHlsSource, samePlaybackIdentity} from './homeVideoPlayback';
 
 export const PlayMethod = {
 	DirectPlay: 'DirectPlay',
@@ -160,8 +161,9 @@ const getServerCredentials = (item) => {
 // reload negotiates against that server rather than the default one
 const currentSessionItem = () => {
 	const creds = currentSession?.serverCredentials;
-	if (!creds) return undefined;
+	if (!creds) return currentSession?.item;
 	return {
+		...currentSession?.item,
 		_serverUrl: creds.serverUrl,
 		_serverAccessToken: creds.accessToken,
 		_serverUserId: creds.userId,
@@ -236,6 +238,9 @@ const selectMediaSource = (mediaSources, capabilities, options, passthroughSetti
 };
 
 const determinePlayMethod = (mediaSource, capabilities, options = {}, passthroughSettings = DEFAULT_PASSTHROUGH_SETTINGS) => {
+	// Internal Transcode selects the server's HLS URL and retains Tizen's manifest,
+	// resume and old-firmware 4K preparation. Reporting remux is handled separately.
+	if (options.homeVideoHls) return PlayMethod.Transcode;
 	if (options.forceDirectPlay) return PlayMethod.DirectPlay;
 
 	const mediaStreams = mediaSource?.MediaStreams || [];
@@ -468,21 +473,32 @@ const autoMaxBitrate = async (capabilities, creds, canMeasure) => {
 };
 
 export const getPlaybackInfo = async (itemId, options = {}) => {
+	const api = options.item ? getApiForItem(options.item) : jellyfinApi.api;
+	const playbackIdentity = api.getServerInfo?.();
+	let homeVideoHls = false;
+	let policySourceId = null;
+	options = {...options, homeVideoHls: false};
+	const assertCurrent = () => {
+		if (options.shouldAbort?.()) throw new Error('Playback request cancelled');
+		if (!samePlaybackIdentity(playbackIdentity, api.getServerInfo?.())) throw new Error('Session changed');
+	};
+
 	const serverType = options.serverType || options.item?._serverType || jellyfinApi.getServerType();
 	const storedSettings = (await getFromStorage('settings')) || {};
 	const passthroughSettings = await getPlaybackAudioSettings(options, storedSettings);
 	const profileOptions = {...options, passthroughSettings};
 	const capabilities = await getDeviceCapabilities(profileOptions);
+	assertCurrent();
 
 	// Cross-server: use item's server if available
-	const api = options.item ? getApiForItem(options.item) : jellyfinApi.api;
 	const creds = options.item ? getServerCredentials(options.item) : null;
 
-	const deviceProfile = applyProfileTuning(
+	const tunedProfile = applyProfileTuning(
 		options.deviceProfile || await getDeviceProfile(serverType, profileOptions, api),
 		storedSettings,
 		capabilities
 	);
+	let deviceProfile = tunedProfile;
 
 	const isLiveTV = options.isLiveTV || options.item?.Type === 'TvChannel';
 
@@ -490,11 +506,28 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 	// it plays, so a track switch, a reopen or a fallback never brings back what
 	// Force Transcode or Prefer Transcoding turned off. A stop clears it with the
 	// session.
-	const playing = currentSession?.itemId === itemId ? currentSession : null;
-	const allowDirectPlay = playing ? playing.allowDirectPlay : options.enableDirectPlay !== false;
+	const playing = currentSession?.itemId === itemId && samePlaybackIdentity(currentSession.playbackIdentity, playbackIdentity) ? currentSession : null;
+	const requestAllowDirectPlay = playing ? playing.requestAllowDirectPlay : options.enableDirectPlay !== false;
+	let allowDirectPlay = requestAllowDirectPlay;
 	const allowDirectStream = playing ? playing.allowDirectStream : options.enableDirectStream !== false;
 	const enableDirectPlay = allowDirectPlay && options.enableDirectPlay !== false;
 	const enableDirectStream = allowDirectStream && options.enableDirectStream !== false;
+
+	const requestPlaybackInfo = async (id, body) => {
+		assertCurrent();
+		if (homeVideoHls) {
+			body = {...body, DeviceProfile: deviceProfile, EnableDirectPlay: false,
+				EnableDirectStream: enableDirectStream, MediaSourceId: policySourceId};
+		}
+		const result = await api.getPlaybackInfo(id, body);
+		assertCurrent();
+		if (homeVideoHls) {
+			const selected = result.MediaSources?.find(source => source.Id === policySourceId);
+			if (!selected) throw new Error('Home video media source changed');
+			return {...result, MediaSources: [selected]};
+		}
+		return result;
+	};
 
 	// maxBitrate: user-set value (>0), or auto-detect from device capabilities
 	const maxBitrate = options.maxBitrate > 0 ? options.maxBitrate : await autoMaxBitrate(capabilities, creds, !currentSession);
@@ -539,7 +572,7 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 		console.log('[playback] SubtitleProfiles sent to server:', subProfiles.map(p => p.Format + ':' + p.Method).join(', '));
 	}
 
-	let playbackInfo = await api.getPlaybackInfo(itemId, {
+	let playbackInfo = await requestPlaybackInfo(itemId, {
 		DeviceProfile: deviceProfile,
 		StartTimeTicks: requestedStartTime,
 		AutoOpenLiveStream: true,
@@ -581,6 +614,8 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 
 		replaceSession({
 			itemId,
+			item: options.item,
+			playbackIdentity,
 			playSessionId: playbackInfo.PlaySessionId,
 			mediaSourceId: mediaSource.Id,
 			liveStreamId: mediaSource.LiveStreamId || null,
@@ -591,6 +626,7 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 			audioStreamIndex: mediaSource.DefaultAudioStreamIndex,
 			subtitleStreamIndex: requestedSubtitleStreamIndex,
 			maxBitrate: options.maxBitrate,
+			requestAllowDirectPlay,
 			allowDirectPlay,
 			allowDirectStream,
 			serverCredentials: creds
@@ -633,6 +669,29 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 	/* eslint-enable no-shadow */
 
 	let mediaSource = selectMediaSource(playbackInfo.MediaSources, capabilities, options, passthroughSettings);
+	// Classify the source actually selected by normal negotiation, never an item
+	// hint or the first version. PlaybackInfo alone does not start the stream.
+	homeVideoHls = await resolveHomeVideoHls(itemId, options, capabilities, api, mediaSource);
+	assertCurrent();
+	if (homeVideoHls) {
+		policySourceId = mediaSource.Id;
+		allowDirectPlay = false;
+		options = {...options, homeVideoHls: true, forceDirectPlay: false, mediaSourceId: policySourceId};
+		deviceProfile = homeVideoHlsProfile(tunedProfile);
+		playbackInfo = await requestPlaybackInfo(itemId, {
+			DeviceProfile: deviceProfile,
+			StartTimeTicks: requestedStartTime,
+			EnableDirectPlay: false,
+			EnableDirectStream: enableDirectStream,
+			EnableTranscoding: options.enableTranscoding !== false,
+			AudioStreamIndex: options.audioStreamIndex,
+			SubtitleStreamIndex: sentSubtitleStreamIndex,
+			MaxStreamingBitrate: maxBitrate,
+			MediaSourceId: policySourceId
+		});
+		mediaSource = playbackInfo.MediaSources[0];
+	}
+
 
 	// Auto-select a compatible audio stream to avoid unnecessary transcoding
 	let audioStreamIndex = options.audioStreamIndex;
@@ -664,7 +723,7 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 					selectedCodec: altStream.Codec,
 					selectedTitle: altStream.DisplayTitle || altStream.Title
 				});
-				const altInfo = await api.getPlaybackInfo(itemId, {
+				const altInfo = await requestPlaybackInfo(itemId, {
 					DeviceProfile: deviceProfile,
 					StartTimeTicks: requestedStartTime,
 					AutoOpenLiveStream: true,
@@ -688,12 +747,12 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 					defaultIndex: defaultAudioStream.Index,
 					defaultCodec
 				});
-				const retryInfo = await api.getPlaybackInfo(itemId, {
+				const retryInfo = await requestPlaybackInfo(itemId, {
 					DeviceProfile: deviceProfile,
 					StartTimeTicks: requestedStartTime,
 					AutoOpenLiveStream: true,
 					EnableDirectPlay: false,
-					EnableDirectStream: false,
+					EnableDirectStream: homeVideoHls ? enableDirectStream : false,
 					EnableTranscoding: true,
 					AudioStreamIndex: mediaSource.DefaultAudioStreamIndex,
 					SubtitleStreamIndex: sentSubtitleStreamIndex,
@@ -724,7 +783,7 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 		const resolvedSub = findSubtitleStreamByIndex(mediaSource.DefaultSubtitleStreamIndex, mediaSource.MediaStreams);
 		if (resolvedSub && (isPgsSubtitleCodec(resolvedSub.Codec) || isBurnInSubtitleCodec(resolvedSub.Codec))) {
 			console.log('[playback] Server default subtitle is bitmap based on transcode, re-negotiating without burn-in');
-			const noBurnInfo = await api.getPlaybackInfo(itemId, {
+			const noBurnInfo = await requestPlaybackInfo(itemId, {
 				DeviceProfile: deviceProfile,
 				StartTimeTicks: requestedStartTime,
 				AutoOpenLiveStream: true,
@@ -767,11 +826,15 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 		dolbyVision: capabilities.dolbyVision
 	});
 
+	if (homeVideoHls && !isHlsSource(mediaSource)) {
+		throw new Error('Home video requires an HLS playback URL');
+	}
+
 	// If we determined we need transcoding but server didn't provide a TranscodingUrl,
 	// re-request with DirectPlay/DirectStream disabled to force transcoding
 	if (playMethod === PlayMethod.Transcode && !mediaSource.TranscodingUrl) {
 		console.log('[playback] Need transcode but no TranscodingUrl - re-requesting with transcoding forced');
-		playbackInfo = await api.getPlaybackInfo(itemId, {
+		playbackInfo = await requestPlaybackInfo(itemId, {
 			DeviceProfile: deviceProfile,
 			StartTimeTicks: requestedStartTime,
 			AutoOpenLiveStream: true,
@@ -806,13 +869,16 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 
 	// A file recovery can outlive Back or a new selection. Do not replace
 	// the new session with the response to an abandoned negotiation.
-	if (options.shouldAbort?.()) throw new Error('Playback request cancelled');
+	assertCurrent();
 
 	const audioOnlyRemux = playMethod === PlayMethod.Transcode && isAudioOnlyRemuxTranscode(mediaSource);
 	const reportedPlayMethod = audioOnlyRemux ? PlayMethod.DirectStream : playMethod;
 
 	replaceSession({
 		itemId,
+		item: options.item,
+		homeVideoHls,
+		playbackIdentity,
 		playSessionId: playbackInfo.PlaySessionId,
 		mediaSourceId: mediaSource.Id,
 		liveStreamId: mediaSource.LiveStreamId || null,
@@ -824,6 +890,7 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 		audioStreamIndex: audioStreamIndex ?? mediaSource.DefaultAudioStreamIndex,
 		subtitleStreamIndex: requestedSubtitleStreamIndex,
 		maxBitrate: options.maxBitrate,
+		requestAllowDirectPlay,
 		allowDirectPlay,
 		allowDirectStream,
 		serverCredentials: creds
@@ -867,6 +934,7 @@ export const getPlaybackInfo = async (itemId, options = {}) => {
 	}
 
 	return {
+		homeVideoHls,
 		url,
 		playSessionId: playbackInfo.PlaySessionId,
 		mediaSourceId: mediaSource.Id,
@@ -1168,7 +1236,7 @@ export const changeSubtitleStream = async (streamIndex) => {
 	if (!currentSession) return null;
 
 	// Preserve current play method aand don't re-attempt DirectPlay if already transcoding
-	const forceTranscode = currentSession.playMethod === PlayMethod.Transcode;
+	const forceTranscode = currentSession.playMethod === PlayMethod.Transcode && !currentSession.homeVideoHls;
 
 	const newInfo = await getPlaybackInfo(currentSession.itemId, {
 		...currentSession,

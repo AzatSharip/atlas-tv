@@ -27,6 +27,16 @@ describe('isStaticLibraryCard', () => {
 });
 
 describe('modernCardMetrics', () => {
+	test('movie home posters grow by one third without enlarging the three static library tiles', () => {
+		const movie = metrics({platform: 'tizen', isMovie: true});
+		expect(movie.cardWidth / 288).toBeCloseTo(4 / 3);
+		expect(movie.imageHeight / 432).toBeCloseTo(4 / 3);
+		const tile = metrics({platform: 'tizen', isStatic: true});
+		expect(tile).toEqual({imageHeight: 320, cardWidth: 569, expandedWidth: 569});
+		expect(metrics({platform: 'tizen', isStatic: true, isMovie: true})).toEqual(tile);
+		expect(tile.cardWidth * 3 + 24 * 2).toBeLessThanOrEqual(1920 - 120);
+	});
+
 	test('scales the image with the size preset and falls back to the default', () => {
 		expect(metrics({posterSize: 'small'}).imageHeight).toBe(288);
 		expect(metrics().imageHeight).toBe(360);

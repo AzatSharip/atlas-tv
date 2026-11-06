@@ -462,11 +462,11 @@ export const getJellyfinDeviceProfile = async (options = {}) => {
 	// General video containers per Samsung spec tables (for H.264/HEVC)
 	// Note: HEVC only works in MKV/MP4/TS per Samsung docs
 	const generalContainers = [];
-	if (!globalThis.AtlasFolders?.preferRemuxMov && caps.mp4) generalContainers.push('mp4');
-	if (!globalThis.AtlasFolders?.preferRemuxMov && caps.m4v) generalContainers.push('m4v');
+	if (caps.mp4) generalContainers.push('mp4');
+	if (caps.m4v) generalContainers.push('m4v');
 	if (caps.ts) generalContainers.push('ts', 'mpegts');
 	if (caps.mkv) generalContainers.push('mkv', 'matroska');
-	if (!globalThis.AtlasFolders?.preferRemuxMov && caps.mov) generalContainers.push('mov');
+	if (caps.mov) generalContainers.push('mov');
 	if (caps.avi) generalContainers.push('avi');
 
 	console.log('[deviceProfile] DirectPlayProfiles - General:', generalContainers.join(','), generalVideoCodecs.join(','));

@@ -38,6 +38,7 @@ import {isTrickplayOn} from '../../utils/trickplayLayout';
 import useChannelCarousel from './useChannelCarousel';
 import ChannelCarousel from './ChannelCarousel';
 import useSleepTimer from './useSleepTimer';
+import usePlayerBack from './usePlayerBack';
 import useSyncPlayCommands from './useSyncPlayCommands';
 import AudioMode from './audio/AudioMode';
 import useAudioTransport from './audio/useAudioTransport';
@@ -632,7 +633,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 	 * then holds play until the first buffer fill so startup opens on a moving
 	 * picture instead of a stall.
 	 */
-	const openAndPrepare = useCallback(async ({url, playMethod: method, mediaSource, resumeTicks = 0, hasNativePendingSub = false, shouldAbort = null}) => {
+	const openAndPrepare = useCallback(async ({url, playMethod: method, mediaSource, homeVideoHls = false, resumeTicks = 0, hasNativePendingSub = false, shouldAbort = null}) => {
 		const isHls = typeof url === 'string' && url.includes('.m3u8');
 		const isTranscode = method === playback.PlayMethod.Transcode;
         const confirmResume = playback.holdResumeProgress(resumeTicks);
@@ -659,10 +660,10 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		}
 
 		const videoStream = mediaSource?.MediaStreams?.find((s) => s.Type === 'Video');
-		const sourceWidth = window.AtlasFolders.streamWidth(videoStream, isTranscode);
-		const sourceHeight = window.AtlasFolders.streamHeight(videoStream, isTranscode);
+		const sourceWidth = window.AtlasFolders.streamWidth(videoStream, isTranscode, homeVideoHls);
+		const sourceHeight = window.AtlasFolders.streamHeight(videoStream, isTranscode, homeVideoHls);
 		const sourceBitrate = mediaSource?.Bitrate || 0;
-		const is4K = sourceWidth > 1920 || (window.AtlasFolders.preferRemuxMov && sourceHeight > 1080) || sourceBitrate > 20000000;
+		const is4K = sourceWidth > 1920 || (homeVideoHls && sourceHeight > 1080) || sourceBitrate > 20000000;
 
 		// deprecated since Tizen 5, newer firmware takes the cap through
 		// FIXED_MAX_RESOLUTION instead
@@ -874,6 +875,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 			url,
 			playMethod: options.playMethod || session?.playMethod,
 			mediaSource: options.mediaSource || session?.mediaSource,
+			homeVideoHls: options.homeVideoHls ?? session?.homeVideoHls,
 			resumeTicks: seekPositionTicks,
 			shouldAbort: options.shouldAbort
 		});
@@ -889,7 +891,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		if (result.playMethod) setPlayMethod(result.playMethod);
 		setIsHdrContent(isHdrOutput(result.mediaSource, result.playMethod === playback.PlayMethod.Transcode));
 		if (result.playSessionId) playSessionRef.current = result.playSessionId;
-		const started = await startAVPlayback(result.url, positionTicks, {playMethod: result.playMethod, mediaSource: result.mediaSource, shouldAbort});
+		const started = await startAVPlayback(result.url, positionTicks, {playMethod: result.playMethod, mediaSource: result.mediaSource, homeVideoHls: result.homeVideoHls, shouldAbort});
 		if (!started || shouldAbort?.()) return false;
 		playback.reportStart(positionRef.current);
 		playback.startProgressReporting(
@@ -1286,6 +1288,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 				);
 				const effectiveBitrate = selectedQuality || settings.maxBitrate || undefined;
 				const playbackInfoOptions = {
+					shouldAbort: () => !stillCurrent(),
 					startPositionTicks: startPosition,
 					maxBitrate: effectiveBitrate,
 					enableDirectPlay: directAllowed,
@@ -1305,7 +1308,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 					setPlayMethod(r.playMethod);
 					setIsHdrContent(isHdrOutput(r.mediaSource, r.playMethod === playback.PlayMethod.Transcode));
 					setMediaSourceId(r.mediaSourceId);
-					setVideoAspectRatio(window.AtlasFolders.displayAspect(r.mediaSource, getVideoDisplayAspectRatio(r.mediaSource), r.playMethod === playback.PlayMethod.Transcode));
+					setVideoAspectRatio(window.AtlasFolders.displayAspect(r.mediaSource, getVideoDisplayAspectRatio(r.mediaSource), r.playMethod === playback.PlayMethod.Transcode, r.homeVideoHls));
 					playSessionRef.current = r.playSessionId;
 					runTimeRef.current = r.runTimeTicks || 0;
 					setDuration((r.runTimeTicks || 0) / 10000000);
@@ -1591,6 +1594,7 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 					url: result.url,
 					playMethod: result.playMethod,
 					mediaSource: result.mediaSource,
+					homeVideoHls: result.homeVideoHls,
 					resumeTicks: startPosition,
 					hasNativePendingSub: wantsNativeSub,
 					shouldAbort: () => !stillCurrent()
@@ -1997,15 +2001,15 @@ const Player = ({item, resume, initialMediaSourceId, initialAudioIndex, initialS
 		vodRecoveryRef.current?.stop();
 		cancelNextEpisodeCountdown();
 		stopTimeUpdatePolling();
-		await playback.reportStop(positionRef.current);
-		cleanupAVPlay();
-		avplayReadyRef.current = false;
+		try {
+			await playback.reportStop(positionRef.current);
+		} finally {
+			cleanupAVPlay();
+			avplayReadyRef.current = false;
+		}
 	}, [cancelNextEpisodeCountdown, stopTimeUpdatePolling]);
 
-	const handleBack = useCallback(async () => {
-		await teardownPlayback();
-		onBack?.();
-	}, [teardownPlayback, onBack]);
+	const handleBack = usePlayerBack(teardownPlayback, onBack);
 
 	const handleOpenGuide = useCallback(async () => {
 		await teardownPlayback();

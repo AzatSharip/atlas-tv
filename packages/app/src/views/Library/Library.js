@@ -31,6 +31,7 @@ import {useUserDataList} from '../../hooks/useUserDataSync';
 import useItemMenuHold, {cardIndexOf} from '../../hooks/useItemMenuHold';
 import {GRID_DIRECTIONS, IMAGE_SIZES, IMAGE_TYPES, LETTERS, capitalize, createGridKeyDown, createToolbarKeyDown, cycleValue, focusOverhang, horizontalCellPad, stopPropagation} from '../../utils/gridChrome';
 import LibrarySkeleton from './LibrarySkeleton';
+import {libraryCardMetrics} from './libraryCardMetrics';
 
 import css from './Library.module.less';
 
@@ -691,7 +692,12 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 		}
 	}, [isFolderView, onSelectItem, onViewPhoto, libraryId, searchQuery]);
 
-	const {getScrollTo: getGridScrollTo, quickReturn} = useQuickReturnGrid('library-grid');
+	const {getScrollTo, quickReturn} = useQuickReturnGrid('library-grid');
+	const gridScrollToRef = useRef(null);
+	const getGridScrollTo = useCallback((scrollTo) => {
+		gridScrollToRef.current = scrollTo;
+		getScrollTo(scrollTo);
+	}, [getScrollTo]);
 
 	const handleScrollStop = useCallback(() => {
 		if (apiFetchIndexRef.current < totalCount && !isLoading && !loadingMoreRef.current) {
@@ -770,12 +776,23 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 	useEffect(() => {
 		if (showSortPanel || showSettingsPanel || apiFetchIndexRef.current === 0) return undefined;
 		if (items.length === 0 || isLoading || initialFocusDoneRef.current) return undefined;
+		const returnIndex = groupedActive ? null : window.AtlasFolders.returnFocusIndex(libraryId, currentFolderId, items);
+		// The selected video may have been on a later server page before playback.
+		if (returnIndex === -1 && apiFetchIndexRef.current < totalCount) {
+			loadItems(apiFetchIndexRef.current, true);
+			return undefined;
+		}
 		const id = setTimeout(() => {
-			Spotlight.focus(groupedActive ? 'library-group-row-0' : 'library-grid');
+			if (returnIndex !== null && returnIndex >= 0 && gridScrollToRef.current) {
+				gridScrollToRef.current({index: returnIndex, animate: false, focus: true});
+			} else {
+				Spotlight.focus(groupedActive ? 'library-group-row-0' : 'library-grid');
+			}
+			window.AtlasFolders.clearReturnFocus();
 			initialFocusDoneRef.current = true;
 		}, 100);
 		return () => clearTimeout(id);
-	}, [items.length, isLoading, groupedActive, showSortPanel, showSettingsPanel]);
+	}, [items, isLoading, groupedActive, showSortPanel, showSettingsPanel, libraryId, currentFolderId, totalCount, loadItems]);
 
 	// Choosing the sort already in use turns it around rather than doing nothing.
 	const handleSortSelect = useCallback((ev) => {
@@ -970,14 +987,9 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 	}, [handleCloseSortPanel]);
 
 	const effectiveImageType = isSquareDefault ? 'square' : imageType;
-	const isWideImage = effectiveImageType === 'thumbnail';
-	const isSquareImage = effectiveImageType === 'square';
-	// A square and a poster share an image height and differ only in width, while
-	// a thumbnail is sized off its own shorter height.
-	const movieScale = !isArchive && library?.CollectionType === 'movies' ? 1.2 : 1;
-	const posterHeight = isArchive ? 128 : movieScale * (isWideImage
-		? ({small: 128, medium: 160, large: 191, extraLarge: 223}[imageSize] || 160)
-		: ({small: 174, medium: 217, large: 261, extraLarge: 304}[imageSize] || 217));
+	const {posterHeight, cardWidth} = libraryCardMetrics({
+		collectionType: library?.CollectionType, imageType: effectiveImageType, imageSize
+	});
 
 	// A subtitle anywhere in the library makes room for a second line on every
 	// card, so the rows stay level whether or not a given item has one.
@@ -988,12 +1000,6 @@ const Library = ({library, genreFilter, studioFilter, onSelectItem, onViewPhoto,
 	), [items, showCardText, isFolderView, detailedSubtitles]);
 
 	const textHeight = showCardText ? (isArchive ? 105 : hasCardSubtitles ? 61 : 35) : 0;
-	// A square card is as wide as it is tall.
-	const cardWidth = isSquareImage
-		? posterHeight
-		: isWideImage
-			? movieScale * ({small: 227, medium: 284, large: 340, extraLarge: 397}[imageSize] || 284)
-			: movieScale * ({small: 116, medium: 145, large: 174, extraLarge: 203}[imageSize] || 145);
 	const cardHeight = posterHeight + textHeight;
 
 	const cellPadX = horizontalCellPad(cardWidth, window.innerWidth - GRID_INSET);

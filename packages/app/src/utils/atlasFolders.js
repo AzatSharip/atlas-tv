@@ -4,7 +4,12 @@
     let archives = {};
     function isArchive(id) { return archives[id] === true; }
     function register(id, type) { archives[id] = type === 'homevideos'; }
-    let contexts = {}, selection = null;
+    let contexts = {}, selection = null, returnFocus = null;
+    function returnFocusIndex(id, parentId, items) {
+        if (!returnFocus || returnFocus.libraryId !== id || returnFocus.parentId !== parentId) return null;
+        return items.findIndex(item => item.Id === returnFocus.itemId);
+    }
+    function clearReturnFocus() { returnFocus = null; }
     function restore(id) {
         if (!isArchive(id)) return [];
         try { return JSON.parse(root.sessionStorage.getItem('atlas_folder_' + id) || '[]'); }
@@ -17,8 +22,7 @@
     }
     let presence = {}, epoch = 0;
     function reset() {
-        epoch++; presence = {}; contexts = {}; selection = null; archives = {};
-        root.AtlasFolders.preferRemuxMov = false;
+        epoch++; presence = {}; contexts = {}; selection = null; returnFocus = null; archives = {};
         try {
             Object.keys(root.sessionStorage).filter(k => k.indexOf('atlas_folder_') === 0)
                 .forEach(k => root.sessionStorage.removeItem(k));
@@ -63,6 +67,7 @@
         selection = isArchive(id) && item.Type === 'Video' && !item.IsFolder && contexts[id]
             ? {id: item.Id, context: contexts[id], search: (search || '').trim().toLowerCase()}
             : null;
+        returnFocus = selection ? {libraryId: id, parentId: contexts[id].params.ParentId, itemId: item.Id} : null;
     }
     function matches(item) {
         return !!(selection && item.Type === 'Video' && !item.IsFolder && selection.id === item.Id);
@@ -91,11 +96,12 @@
     }
     function play(item, options, start) {
         let chosen = selection;
-        root.AtlasFolders.preferRemuxMov = matches(item);
+        const generation = epoch;
         if (!chosen || chosen.id !== item.Id || (options && options.videoQueue)) {
             start(options); return Promise.resolve();
         }
         return collect(chosen.context).then(function (items) {
+            if (generation !== epoch) return;
             let queue = items.filter(function (entry) {
                 return !entry.IsFolder && entry.Type === 'Video' &&
                     (!Array.isArray(entry.MediaStreams) || entry.MediaStreams.some(function (stream) { return stream.Type === 'Video'; })) && (!chosen.search ||
@@ -111,25 +117,27 @@
             if (index < 0) throw new Error('Selected video is no longer in this folder');
             start(Object.assign({}, options || {}, {videoQueue: queue.slice(index)}));
         }).catch(function () {
+            if (generation !== epoch) return;
             root.alert('Не удалось загрузить очередь папки. Запускается только выбранное видео.');
             start(options);
         });
     }
-    function rotated(stream, transcoding) {
-        return !!(root.AtlasFolders.preferRemuxMov && transcoding && stream &&
+    function rotated(stream, transcoding, homeVideoHls) {
+        return !!(homeVideoHls && transcoding && stream &&
             Math.abs(Number(stream.Rotation) % 180) === 90);
     }
-    function streamWidth(stream, transcoding) {
-        return Number(stream && stream[rotated(stream, transcoding) ? 'Height' : 'Width']) || 0;
+    function streamWidth(stream, transcoding, homeVideoHls = false) {
+        return Number(stream && stream[rotated(stream, transcoding, homeVideoHls) ? 'Height' : 'Width']) || 0;
     }
-    function streamHeight(stream, transcoding) {
-        return Number(stream && stream[rotated(stream, transcoding) ? 'Width' : 'Height']) || 0;
+    function streamHeight(stream, transcoding, homeVideoHls = false) {
+        return Number(stream && stream[rotated(stream, transcoding, homeVideoHls) ? 'Width' : 'Height']) || 0;
     }
-    function displayAspect(source, original, transcoding) {
+    function displayAspect(source, original, transcoding, homeVideoHls = false) {
         let stream = source && (source.MediaStreams || []).find(function(s) { return s.Type === 'Video'; });
-        return rotated(stream, transcoding) && original > 0 ? 1 / original : original;
+        return rotated(stream, transcoding, homeVideoHls) && original > 0 ? 1 / original : original;
     }
     let adapter = {reset: reset, register: register, restore: restore, save: save, list: list, select: select, play: play,
+        returnFocusIndex: returnFocusIndex, clearReturnFocus: clearReturnFocus,
         streamWidth: streamWidth, streamHeight: streamHeight, displayAspect: displayAspect,
         matches: matches, isArchive: isArchive};
     root.AtlasFolders = adapter;

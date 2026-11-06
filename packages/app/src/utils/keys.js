@@ -82,7 +82,8 @@ export const KEYS = {
 
 export const isBackKey = (e) => {
 	const code = e.keyCode || e.which;
-	return code === KEYS.BACK || code === 27 || code === 8;
+	return code === KEYS.BACK || code === 27 || code === 8 ||
+		e.key === 'GoBack' || e.key === 'Escape' || e.key === 'Backspace';
 };
 
 // A remote with a menu key does with one press what the others do by holding OK.

@@ -9,10 +9,19 @@ A personal-media-focused fork of [Moonfin Smart TV](https://github.com/Moonfin-C
 - Оформление Atlas: прямоугольная плитка Samsung, светлый векторный логотип и движущийся скринсейвер.
 - Улучшенные русские подписи и спокойная рамка выбора вокруг папок и файлов, в том числе без превью.
 - В библиотеках Jellyfin типа «Домашние видео и фото» (`homevideos`): запуск ролика одним нажатием, очередь остальных видео текущей папки, возврат в ту же папку, крупные подписи.
-- Для домашнего видео на Tizen: предпочтение потокового HLS вместо прямого MP4/MOV; видео может копироваться без перекодирования, если сервер и формат позволяют.
+- Для архивных H.264-видео в MP4/MOV/M4V на Tizen: потоковый HLS при запуске из папки, поиска, очереди и продолжения просмотра; совместимое видео копируется без перекодирования. Другие форматы сохраняют обычный подбор режима.
 - Учёт поворота телефона при настройке декодера и пропорций вертикального транскодированного видео на старых Samsung.
 
 Оригиналы не перемещаются и не изменяются. Сервер, учётную запись и библиотеки пользователь подключает сам. В исходниках нет настроек конкретного сервера.
+
+## Update 3.0.2
+
+- Select archive HLS from the current authenticated library and selected media source, independent of the last selected folder card. Preserve source, bitrate and account boundaries across retries and track changes.
+- Preserve normal negotiation for HEVC, AVI/MKV and movie libraries to avoid unnecessary video encoding.
+- Handle Back once per physical press, restore archive focus, and confirm exit at the root.
+- Enlarge movie/cartoon posters, add an explicit PIN erase button and an original child avatar.
+
+Automated playback/UI regressions, the Tizen build and native-device playback checks passed. See [playback behavior and limits](docs/PLAYBACK_RECOVERY.md) and [Back navigation](docs/BACK_NAVIGATION.md). New formats, very high bitrates and servers without sufficient transcoding capacity may still need separate testing.
 
 ## Video release 3.0.0
 
@@ -34,7 +43,7 @@ node scripts/test-atlas-folders.cjs
 npm run build:tizen:oblong -- --skip-tizen-cli
 ```
 
-The result is an **unsigned** `Atlas_Tizen_Oblong_v3.0.0.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
+The result is an **unsigned** `Atlas_Tizen_Oblong_v3.0.2.wgt` in the repository root. The build runs the upstream lint gate and Tizen compatibility transforms. Sign locally with your own compatible Tizen author/distributor certificates and install through the Samsung developer tools. No certificates or device credentials are shipped here. An unsigned package alone cannot be installed on a retail TV.
 
 This fork intentionally retains the Tizen application/package IDs and existing `moonfin_*` storage keys for an in-place upgrade of an existing Moonfin installation signed with the **same author certificate**. Atlas and Moonfin therefore cannot coexist under these IDs. Do not uninstall your working client just to change the branding; keep a signed rollback package and a private settings backup outside this repository.
 

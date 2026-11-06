@@ -42,10 +42,15 @@ session on background/exit. A crash is covered by expiry. Nothing should restore
 the previous private page on startup. Device enrollment itself is persistent and
 must be provisioned privately; possession permits child entry, not adult entry.
 PIN recovery is an administrator operation outside the television interface.
+The chooser uses an original vector mouse for the child and retains the adult A.
+The remote-selectable «Стереть» key removes only the last PIN digit; confirmation
+remains explicit OK, including for six-digit codes.
 
 Video UX: recursive index-based empty-folder filtering (four concurrent checks,
 30-second presence cache), direct card playback with a server-progress choice,
-20% larger movie posters, 15-second jumps and accelerated held-arrow previews.
+five movie/cartoon poster columns at the default Full HD library size, movie home-row
+posters enlarged by a further third, 15-second jumps and accelerated held-arrow previews.
+The three fixed home library tiles and the archive grid retain their dimensions.
 The archive's physical hierarchy and folder queue are preserved. Photos are out
 of scope. Scan/index configuration must remain enabled on the server.
 

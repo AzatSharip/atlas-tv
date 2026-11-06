@@ -9,6 +9,7 @@ import {familyEnrollment, profileRequest, setFamilyRole} from '../services/famil
 import * as playback from '../services/playback';
 import {stopProfilePlayback} from '../services/video';
 import {isBackKey} from '../utils/keys';
+import ChildMouseAvatar from '../components/icons/ChildMouseAvatar';
 import css from './FamilyAuthContext.module.less';
 
 const Button = Spottable('button');
@@ -152,7 +153,7 @@ export const FamilyAuthProvider = ({children}) => {
                 <h2>Кто смотрит?</h2>
                 <div className={css.profiles}>
                     <Button spotlightId="profile-child" disabled={busy} onClick={enterChild} className={css.tile}>
-                        <span className={css.childAvatar}>★</span><span>Детский</span>
+                        <span className={css.childAvatar}><ChildMouseAvatar /></span><span>Детский</span>
                     </Button>
                     <Button spotlightId="profile-adult" disabled={busy} onClick={openPin} className={css.tile}>
                         <span className={css.adultAvatar}>A</span><span>Взрослый</span>
@@ -164,8 +165,8 @@ export const FamilyAuthProvider = ({children}) => {
                 <div className={css.dots} aria-label="PIN">{pin.replace(/./g, '●') || '—'}</div>
                 <div className={css.keys}>
                     {'123456789'.split('').map(digit => <Button key={digit} spotlightId={'profile-digit-' + digit} disabled={busy} data-digit={digit} onClick={digitPress}>{digit}</Button>)}
-                    <Button disabled={busy} onClick={erase}>⌫</Button>
-                    <Button disabled={busy} data-digit="0" onClick={digitPress}>0</Button>
+                    <Button disabled={busy} spotlightId="profile-erase" className={css.erase} aria-label="Стереть последнюю цифру" onClick={erase}>Стереть</Button>
+                    <Button disabled={busy} spotlightId="profile-digit-0" data-digit="0" onClick={digitPress}>0</Button>
                     <Button disabled={busy} spotlightId="profile-submit" onClick={submitPin}>OK</Button>
                 </div>
                 <Button onClick={cancel}>Отмена</Button>

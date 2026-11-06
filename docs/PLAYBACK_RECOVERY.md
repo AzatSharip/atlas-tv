@@ -27,3 +27,23 @@ They complement device testing; they do not guarantee all codecs or file sizes.
 Install an update with the same Tizen application identity and signing author.
 Keep a previously working signed package for rollback. Source publication and
 CI builds do not deploy to a television or change a server's configuration.
+
+## Archive delivery in 3.0.2
+
+For Tizen, H.264 video in MP4/MOV/M4V inside an authenticated `homevideos`
+library uses HLS. Classification follows the selected media source and its
+current library, so opening a folder, a resume card, search, an explicit queue
+or a subsequent clip no longer depends on the previously selected card.
+Compatible video is copied into segments; the server may convert the audio
+for the device. The original files and bitrate ceiling remain unchanged.
+
+Movies, HEVC sources, AVI/MKV and other platforms retain their ordinary
+negotiation. This distinction matters on older TVs: forcing every source into
+an H.264 HLS profile could introduce expensive HEVC video conversion.
+Rotation handling receives the current playback policy explicitly. Profile
+changes and cancelled requests must not leak a previous item's policy.
+
+A codec or resolution the device cannot decode may still need video encoding.
+A bitrate ceiling is a permission to use that quality, not a bandwidth guarantee.
+Device acceptance must distinguish startup buffering, seek preparation and
+unrequested interruptions during normal playback.

@@ -242,14 +242,14 @@ const MediaCard = ({item, serverUrl, cardType = 'portrait', rowImageType = 'post
 	const sizeMultiplier = POSTER_SIZE_MULTIPLIERS[settings.homeRowsPosterSize] || 1;
 	const shapeKey = isBanner ? 'banner' : isLandscape ? 'landscape' : isSquare ? 'square' : 'portrait';
 	const baseSize = classicCardSize(shapeKey, settings.homeRowsPosterSize);
-    const movieScale = item.Type === 'Movie' ? 1.2 : 1;
+    const movieScale = item.Type === 'Movie' ? (shapeKey === 'portrait' ? 1.6 : 1.2) : 1;
     const cardWidth = Math.round(baseSize.width * movieScale);
     const cardHeight = Math.round(baseSize.height * movieScale);
 	// The genre name grows with the card so it reads on a poster and on a
 	// focused thumbnail alike, and the seerr genre cards use the same scale.
 	const genreLabelSize = Math.min(24, Math.max(14, cardWidth * (14 / 200)));
-	const sizeStyle = sizeMultiplier !== 1 ? {width: cardWidth + 'px'} : undefined;
-	const imgSizeStyle = sizeMultiplier !== 1 ? {height: cardHeight + 'px'} : undefined;
+	const sizeStyle = sizeMultiplier !== 1 || movieScale !== 1 ? {width: cardWidth + 'px'} : undefined;
+	const imgSizeStyle = sizeMultiplier !== 1 || movieScale !== 1 ? {height: cardHeight + 'px'} : undefined;
 	// Logos and studio art have to sit inside the card whole. Everything else takes
 	// the cover the stylesheet already applies, so it stays out of the inline style.
 	const imgStyle = imageType === 'logo' || item.Type === 'Studio' || item.Type === 'Network'

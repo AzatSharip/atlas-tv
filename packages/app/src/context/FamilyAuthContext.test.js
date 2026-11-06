@@ -6,7 +6,7 @@ import {stopProfilePlayback} from '../services/video';
 import {FamilyAuthProvider} from './FamilyAuthContext';
 import {profileRequest} from '../services/familySession';
 
-jest.mock('@enact/spotlight/Spottable', () => tag => function MockSpot(props) { const clean = {...props}; delete clean.spotlightId; return require('react').createElement(tag, clean); });
+jest.mock('@enact/spotlight/Spottable', () => tag => function MockSpot(props) { const clean = {...props, 'data-spotlight-id': props.spotlightId}; delete clean.spotlightId; return require('react').createElement(tag, clean); });
 jest.mock('@enact/spotlight', () => ({focus: jest.fn()}));
 jest.mock('./AuthContext', () => ({AuthContext: require('react').createContext(null), clearAllCaches: jest.fn()}));
 jest.mock('../services/jellyfinApi', () => ({setAuth: jest.fn(), setServer: jest.fn(), setServerType: jest.fn(), initDeviceId: jest.fn(), api: {}}));
@@ -29,6 +29,39 @@ beforeEach(() => {
     profileRequest.mockReset();
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+test('visible remote-selectable erase removes one PIN digit and never submits', async () => {
+    // React DOM root requires act.
+    // eslint-disable-next-line testing-library/no-unnecessary-act
+    await act(async () => root.render(<FamilyAuthProvider><div>CONTENT</div></FamilyAuthProvider>));
+    await click('Взрослый');
+    const eraseButton = container.querySelector('[data-spotlight-id="profile-erase"]');
+    expect(eraseButton.textContent).toBe('Стереть');
+    expect(eraseButton.getAttribute('aria-label')).toBe('Стереть последнюю цифру');
+    expect(eraseButton.disabled).toBe(false);
+    await click('Стереть');
+    for (const digit of '0123456') await click(digit);
+    expect(container.querySelector('[aria-label="PIN"]').textContent).toBe('●●●●●●');
+    await click('Стереть');
+    expect(container.querySelector('[aria-label="PIN"]').textContent).toBe('●●●●●');
+    expect(profileRequest).not.toHaveBeenCalled();
+    await click('9');
+    profileRequest.mockRejectedValue(new Error('fixture failure'));
+    await click('OK');
+    expect(profileRequest).toHaveBeenCalledWith('login', {action: 'pin', pin: '012349'});
+});
+
+test('erase is disabled while the PIN is being checked', async () => {
+    let resolve;
+    profileRequest.mockImplementation(action => action === 'login' ? new Promise(r => { resolve = r; }) : Promise.resolve({}));
+    // React DOM root requires act.
+    // eslint-disable-next-line testing-library/no-unnecessary-act
+    await act(async () => root.render(<FamilyAuthProvider><div>CONTENT</div></FamilyAuthProvider>));
+    await click('Взрослый'); await click('1'); await click('OK');
+    expect(container.querySelector('[data-spotlight-id="profile-erase"]').disabled).toBe(true);
+    await click('Отмена');
+    await act(async () => resolve({Role: 'adult', User: {Id: 'adult-fixture'}, AccessToken: 'late-token'}));
+});
+
 test('only two entries; full PIN including prefix/zeros submitted only on explicit OK', async () => {
     profileRequest.mockImplementation(async action => action === 'login' ? {Role: 'owner', User: {Id: 'owner-fixture'}, AccessToken: 'fixture-token'} : {});
     // React DOM root (not Testing Library) requires act.
